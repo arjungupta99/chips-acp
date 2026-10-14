@@ -1,0 +1,7 @@
+{
+  "name": "ACP agents",
+  "agents": [
+    { "name": "Goose", "command": ["goose", "acp"], "cwd": "~/chips-acp/goose" },
+    { "name": "Gemini", "command": ["gemini", "--acp"], "cwd": "~/chips-acp/gemini" }
+  ]
+}
