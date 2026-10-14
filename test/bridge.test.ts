@@ -84,11 +84,13 @@ describe("a turn", () => {
     assert.equal(started.payload["goal"], "summarise the notes");
     const step = await sent(chips, "step.log", (event) => event.payload["status"] === "done");
     assert.equal(step.payload["tool"], "read");
+    assert.equal(step.payload["kind"], "file", "ACP's read is a file, drawn as one");
     assert.equal(step.payload["title"], "read · Read notes.md");
     const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
     assert.equal(words.payload["text"], "Here is the answer.");
     const usage = await sent(chips, "usage");
     assert.deepEqual(usage.payload["cost"], { usd: 0.02, estimated: true });
+    assert.equal(usage.payload["output_tokens"], undefined, "the cost alone, no made-up tokens");
     const done = await sent(chips, "run.completed");
     assert.equal(done.payload["summary"], "Here is the answer.");
   });

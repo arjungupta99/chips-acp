@@ -18,7 +18,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Run, Speaker } from "@chips/harness";
 import { promptFor } from "@chips/harness";
-import type { MessageNew, RiskClass } from "@chips/protocol";
+import type { MessageNew, RiskClass, StepKind } from "@chips/protocol";
 import {
   AcpClient,
   AcpError,
@@ -118,7 +118,7 @@ interface Turn {
   cost?: number | undefined;
   saidAt: number;
   gaugeAt: number;
-  readonly steps: Map<string, { title: string; tool: string; done: boolean }>;
+  readonly steps: Map<string, { title: string; tool: string; kind: StepKind; done: boolean }>;
   /** Tool calls a person allowed, to their approvals: the card says how each went. */
   readonly allowed: Map<string, string>;
 }
@@ -419,7 +419,8 @@ export class Bridge {
     }
     const spent = (turn.cost ?? 0) - (turn.costAtStart ?? 0);
     if (turn.cost !== undefined && spent > 0) {
-      await run.usage({ model: room.agent.config.name, outputTokens: 0, costUsd: spent }).catch(() => undefined);
+      // ACP says what a session has cost, not its tokens: the cost alone (Chips ADR 0162).
+      await run.usage({ model: room.agent.config.name, costUsd: spent }).catch(() => undefined);
     }
     if (stop === "refusal") {
       await run.fail({ error: `${room.agent.config.name} refused.` });
@@ -439,7 +440,9 @@ export class Bridge {
     for (const [stepId, step] of turn.steps) {
       if (step.done) continue;
       step.done = true;
-      await turn.run.step({ stepId, status, title: step.title, tool: step.tool }).catch(() => undefined);
+      await turn.run
+        .step({ stepId, status, title: step.title, tool: step.tool, kind: step.kind })
+        .catch(() => undefined);
     }
   }
 
@@ -512,10 +515,11 @@ export class Bridge {
     const known = turn.steps.get(stepId);
     const title = typeof update["title"] === "string" ? update["title"] : (known?.title ?? "A tool call");
     const tool = toolOf(update) ?? known?.tool ?? "tool";
+    const kind = kindOf(update["kind"]) ?? known?.kind ?? "other";
     const status = update["status"];
     const done = status === "completed" || status === "failed";
     if (known?.done === true) return;
-    turn.steps.set(stepId, { title, tool, done });
+    turn.steps.set(stepId, { title, tool, kind, done });
     const approvalId = turn.allowed.get(stepId);
     if (done && approvalId !== undefined) {
       turn.allowed.delete(stepId);
@@ -528,6 +532,7 @@ export class Bridge {
         status: status === "failed" ? "failed" : done ? "done" : "started",
         title: `${tool} · ${title}`.slice(0, 300),
         tool,
+        kind,
       })
       .catch(() => undefined);
   }
@@ -641,6 +646,27 @@ function lastLine(text: string): string {
 function toolOf(call: Readonly<Record<string, unknown>>): string | undefined {
   if (typeof call["name"] === "string" && call["name"] !== "") return call["name"];
   return typeof call["kind"] === "string" ? call["kind"] : undefined;
+}
+
+/**
+ * What kind of call an ACP tool call is, in Chips's words (Chips ADR 0162), so the thinking
+ * bubble draws it as what it does: ACP names a call's kind, rarely its tool.
+ */
+const KINDS: Readonly<Record<string, StepKind>> = {
+  read: "file",
+  move: "file",
+  edit: "edit",
+  delete: "edit",
+  search: "search",
+  execute: "shell",
+  fetch: "web",
+  think: "other",
+  switch_mode: "other",
+  other: "other",
+};
+
+function kindOf(kind: unknown): StepKind | undefined {
+  return typeof kind === "string" ? KINDS[kind] : undefined;
 }
 
 function slugOf(word: string): string {
