@@ -23,7 +23,14 @@ it("passes the golden scenario", async () => {
       name: "chips-acp",
       capabilities: ["agents", "restarts"],
       start: async (address) => {
-        client = await connect({ url: address.url, token: address.token });
+        // As main.ts connects: a person's Restart starts the agents again.
+        client = await connect({
+          url: address.url,
+          token: address.token,
+          onRestart: async () => {
+            await bridge?.restart();
+          },
+        });
         bridge = new Bridge({
           chips: client,
           agents: [{ name: "Fakey", command: ["fake"], cwd: mkdtempSync(join(tmpdir(), "chips-acp-")) }],
@@ -46,4 +53,18 @@ it("passes the golden scenario", async () => {
     [],
     formatReport(report).join("\n"),
   );
+  // Supervised, and in Chips as far as a person's Restart: the level the gallery says.
+  assert.deepEqual(
+    report.levels.map((level) => [level.label, level.has]),
+    [
+      ["Talks", 1],
+      ["Supervised", 1],
+      ["Lives in Chips", 2],
+      ["Managed from Chips", 0],
+    ],
+  );
+  assert.deepEqual(report.levels[2]?.capabilities, [
+    { capability: "agents", outcome: "declared" },
+    { capability: "restarts", outcome: "passed" },
+  ]);
 });
