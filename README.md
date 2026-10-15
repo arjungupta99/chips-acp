@@ -39,6 +39,22 @@ the folder its sessions work in. `mode` is the mode its sessions are put in, of 
 offers (see below). `env` adds to its environment. Installing an agent and signing it
 in to a model is done the agent's own way, before it is named here.
 
+### As a launch agent
+
+Once it has joined (its key is in the keychain, under the server's address), launchd can keep it
+running from login, and start it again if it stops. `~/Library/LaunchAgents/chat.chips.acp.plist`
+runs `/opt/homebrew/bin/node --import tsx src/main.ts` in this folder with `CHIPS_URL` set to the
+address it joined (so the kept key is found, and no link is needed), `RunAtLoad` and `KeepAlive`,
+and logs to `~/Library/Logs/chips-acp.log`.
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/chat.chips.acp.plist   # load and start
+launchctl kickstart -k gui/$(id -u)/chat.chips.acp                            # restart
+launchctl bootout gui/$(id -u)/chat.chips.acp                                 # stop and unload
+```
+
+Stop any copy started by hand first: two bridges for one harness answer twice.
+
 ### Asking a person
 
 Claude Code's and Codex's adapters start each session in a mode where the agent decides for
