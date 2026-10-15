@@ -98,6 +98,13 @@ turns; Codex's didn't, as on a ChatGPT sign-in its adapter reports none. An appr
 from each, asked, approved in Chips, the call run, and said so. Chips's
 `testing/scenarios/harnesses/acp-agents-live.md` has the run.
 
+Later that night, one harness per kind (`~/.chips-acp/claude-code.json`, `codex.json`, launch
+agents `chat.chips.acp.claude-code` and `chat.chips.acp.codex`), for each: a room from the +
+claimed and answered by a new agent in its own folder; a new agent from Add; a Fork whose copy
+remembered what came before and whose original didn't hear the copy; the harness's own agent
+moved out of its room; the copy deleted, its folder kept; and a session closed after 30 quiet
+minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all Claude Code's.
+
 ## What maps to what
 
 | Chips | ACP |
