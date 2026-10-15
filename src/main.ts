@@ -1,75 +1,70 @@
 /**
- * `npm start [config]`: the bridge as a daemon. It joins Chips once — with a link a person made in
- * Chips (`CHIPS_JOIN_LINK`), or with a code a person allows — and keeps its key; then it connects,
- * registers its agents, runs them, and answers for them until it is stopped.
+ * `npm start [config]`: one kind of ACP agent as a Chips harness, run as a daemon. It joins Chips
+ * once — with a link a person made in Chips (`CHIPS_JOIN_LINK`), or with a code a person allows —
+ * and keeps its key under the kind's name; then it connects, runs the agent, and answers for
+ * every agent of the kind Chips makes, until it is stopped. A second kind is a second config, run
+ * beside it.
  *
- * The config is JSON: `{ "agents": [{ "name": "Goose", "command": ["goose", "acp"], "cwd": "~/work" }] }`,
- * `~/.chips-acp/config.json` unless a path is given. What it keeps is beside it: the SDK's state
- * (cursor, unanswered events, runs not ended) and which session each room is.
+ * The config is JSON:
+ * `{ "name": "Claude Code", "command": ["claude-agent-acp"], "mode": "default", "folders": "~/chips-acp/claude-code" }`,
+ * `~/.chips-acp/config.json` unless a path is given. What it keeps is in a folder beside it, named
+ * after it (`~/.chips-acp/claude-code/` for `claude-code.json`): the SDK's state (cursor,
+ * unanswered events, runs not ended), and its agents and which session each of their rooms is.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { connect, fileStore, join as joinChips } from "@chips/harness";
 import { processWire } from "./acp.js";
-import { type AgentConfig, Bridge, type BridgeState } from "./bridge.js";
-
-interface Config {
-  readonly name?: string;
-  readonly agents: readonly AgentConfig[];
-}
+import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 
-function readConfig(path: string): Config {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as { name?: unknown; agents?: unknown };
-  if (!Array.isArray(raw.agents) || raw.agents.length === 0) {
-    throw new Error(`${path} names no agents: { "agents": [{ "name", "command", "cwd" }] }`);
+function readConfig(path: string): KindConfig {
+  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  const name = raw["name"];
+  const command = raw["command"];
+  if (typeof name !== "string" || name.trim() === "" || !Array.isArray(command) || command.length === 0) {
+    throw new Error(`${path} names a kind of agent and how to run it: { "name", "command", "folders" }`);
   }
-  const agents = (raw.agents as Record<string, unknown>[]).map((agent) => {
-    if (typeof agent["name"] !== "string" || !Array.isArray(agent["command"])) {
-      throw new Error(`each agent in ${path} has a name and a command`);
-    }
-    return {
-      name: agent["name"],
-      command: (agent["command"] as unknown[]).map(String),
-      cwd: resolve(home(typeof agent["cwd"] === "string" ? agent["cwd"] : "~/chips-acp/work")),
-      ...(typeof agent["mode"] === "string" ? { mode: agent["mode"] } : {}),
-      ...(typeof agent["env"] === "object" && agent["env"] !== null
-        ? { env: agent["env"] as Record<string, string> }
-        : {}),
-    };
-  });
-  return { ...(typeof raw.name === "string" ? { name: raw.name } : {}), agents };
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return {
+    name,
+    command: command.map(String),
+    folders: resolve(home(typeof raw["folders"] === "string" ? raw["folders"] : `~/chips-acp/${slug}`)),
+    ...(typeof raw["folder"] === "string" ? { folder: resolve(home(raw["folder"])) } : {}),
+    ...(typeof raw["mode"] === "string" ? { mode: raw["mode"] } : {}),
+    ...(typeof raw["env"] === "object" && raw["env"] !== null ? { env: raw["env"] as Record<string, string> } : {}),
+  };
 }
 
 const configPath = resolve(home(process.argv[2] ?? "~/.chips-acp/config.json"));
-const config = readConfig(configPath);
-const folder = dirname(configPath);
-const statePath = join(folder, "sessions.json");
+const kind = readConfig(configPath);
+const folder = join(dirname(configPath), basename(configPath, ".json"));
+const statePath = join(folder, "state.json");
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 
-for (const agent of config.agents) mkdirSync(agent.cwd, { recursive: true });
+mkdirSync(folder, { recursive: true, mode: 0o700 });
+mkdirSync(kind.folder ?? kind.folders, { recursive: true });
 
 const joined = await joinChips({
   link: process.env["CHIPS_JOIN_LINK"],
   url: process.env["CHIPS_URL"],
-  name: config.name ?? "ACP agents",
-  software: "chips-acp 0.1.0",
-  wants: ["agents", "restarts"],
+  name: kind.name,
+  software: "chips-acp 0.2.0",
+  wants: ["agents", "new_spaces", "new_agents", "forks", "restarts"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 });
 
-const state: BridgeState = existsSync(statePath)
-  ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
-  : { sessions: {} };
+const kept = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as Partial<BridgeState>) : {};
+const state: BridgeState = { sessions: kept.sessions ?? {}, agents: kept.agents ?? {} };
 
 let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
-  client: { name: "chips-acp", version: "0.1.0" },
+  client: { name: "chips-acp", version: "0.2.0" },
   store: fileStore(join(folder, "chips-state.json")),
   onRestart: async () => {
     log("a person asked for a restart");
@@ -79,18 +74,17 @@ const chips = await connect({
 
 bridge = new Bridge({
   chips,
-  agents: config.agents,
-  home: joined.spaceId,
+  kind,
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
-  wireFor: (agent) =>
-    processWire(agent.command, agent.cwd, { ...process.env, ...agent.env }, (line) =>
-      log(`${agent.name}: ${line}`),
+  wire: () =>
+    processWire(kind.command, kind.folder ?? kind.folders, { ...process.env, ...kind.env }, (line) =>
+      log(`${kind.name}: ${line}`),
     ),
   log,
 });
 await bridge.start();
-log(`connected as ${chips.harnessId}, ${config.agents.length} agent(s)`);
+log(`connected as ${chips.harnessId} (${kind.name}), ${Object.keys(state.agents).length} agent(s)`);
 
 const stop = () => {
   bridge?.stop();

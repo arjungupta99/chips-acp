@@ -11,22 +11,21 @@ import { processWire } from "../src/acp.ts";
 import { Bridge } from "../src/bridge.ts";
 
 it("runs an agent's process, answers through it, and runs it again when it dies", async () => {
-  const chips = await startFakeChips({ capabilities: ["agents", "restarts"] });
+  const chips = await startFakeChips({ capabilities: ["agents", "restarts"], harnessName: "Stdio" });
   const client = await connect({ url: chips.address.url, token: chips.address.token });
   const logged: string[] = [];
-  const agent = {
+  const kind = {
     name: "Stdio",
     // tsx by its path: the agent runs in its own folder, where nothing resolves.
     command: [process.execPath, "--import", import.meta.resolve("tsx"), join(import.meta.dirname, "stdio-agent.ts")],
-    cwd: mkdtempSync(join(tmpdir(), "chips-acp-")),
+    folders: mkdtempSync(join(tmpdir(), "chips-acp-")),
   };
   const bridge = new Bridge({
     chips: client,
-    agents: [agent],
-    home: chips.address.spaceId,
-    state: { sessions: {} },
+    kind,
+    state: { sessions: {}, agents: {} },
     saveState: () => undefined,
-    wireFor: (config) => processWire(config.command, config.cwd, process.env, (line) => logged.push(line)),
+    wire: () => processWire(kind.command, kind.folders, process.env, (line) => logged.push(line)),
     respawnMs: 50,
     log: (line) => logged.push(line),
   });

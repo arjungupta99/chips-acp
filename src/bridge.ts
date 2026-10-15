@@ -1,10 +1,14 @@
 /**
- * ACP agents as one Chips harness. Each configured agent is a Chips agent (ADR 0087), registered
- * by its own key; the first is the harness's Main agent, in the harness's own room, in the place of
- * the default agent Chips gave the harness there. The first agent also answers for that default
- * agent, and any other of the harness's Chips doesn't name here, wherever Chips puts one. A room an
- * agent is in is one ACP session of it, made the first time somebody there speaks to it and kept
- * across restarts.
+ * One kind of ACP agent as a Chips harness: Claude Code, or Codex, or Goose, each run as its own
+ * harness. Its agents are made from Chips — a room from the +, a new agent from a room's Add page,
+ * a copy from Fork — and the bridge keeps each as a record: Chips's id, its key, its name, and the
+ * folder it works in, its own unless it is a copy, which works on in its original's. There is no
+ * Main agent: the agent Chips gives every harness, in the harness's own room, is one more of them,
+ * and goes wherever a person moves it.
+ *
+ * One ACP process serves every agent. A room an agent is in is one ACP session of it, in its
+ * folder, made the first time somebody there speaks to it and kept across restarts; a session
+ * quiet for a while is closed, and loaded again on the next word.
  *
  * A message for an agent is a run: `session/prompt` with what Chips hands over (the room note,
  * what was said, the words), and what the agent streams back is the run — thoughts as its status,
@@ -14,11 +18,13 @@
  * turn when the steer interrupts.
  */
 
+import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Agent, Chips, Decision, Run, Speaker } from "@chips/harness";
+import type { Agent, Chips, Decision, Run, Speaker, SpaceAsked } from "@chips/harness";
 import { promptFor } from "@chips/harness";
-import type { MessageNew, RiskClass, StepKind } from "@chips/protocol";
+import type { AgentAsked, AgentFork, AnyEvent, MessageNew, RiskClass, StepKind } from "@chips/protocol";
 import {
   AcpClient,
   AcpError,
@@ -29,13 +35,12 @@ import {
   type Wire,
 } from "./acp.js";
 
-export interface AgentConfig {
-  /** What a person sees, and its @handle: `Goose`. */
+/** The kind of agent this harness is, and how to run it. */
+export interface KindConfig {
+  /** The harness's name in Chips, and its own agent's: `Claude Code`. */
   readonly name: string;
-  /** How to run it: `["goose", "acp"]`, `["gemini", "--acp"]`. */
+  /** How to run it: `["claude-agent-acp"]`, `["codex-acp"]`, `["goose", "acp"]`. */
   readonly command: readonly string[];
-  /** Where its sessions work: the folder it may read and change. */
-  readonly cwd: string;
   /** More environment for its process, beside this one's. */
   readonly env?: Readonly<Record<string, string>> | undefined;
   /**
@@ -44,68 +49,86 @@ export interface AgentConfig {
    * Chips as cards; their own modes (`auto`, `agent`) let the agent decide. Its own when absent.
    */
   readonly mode?: string | undefined;
+  /** Where each agent gets a folder of its own, named after it: `~/chips-acp/claude-code`. */
+  readonly folders: string;
+  /** One folder every agent works in, in the place of one each: a repository they share. */
+  readonly folder?: string | undefined;
+}
+
+/** One of the harness's agents, as the bridge keeps it. */
+export interface AgentRecord {
+  /** The bridge's name for it in Chips. */
+  readonly key: string;
+  /** Chips's id for it: empty until Chips has it. */
+  agentId: string;
+  /** What it is called in Chips, where a person may rename it. */
+  name: string;
+  /** Where its sessions work. */
+  readonly folder: string;
+  /** The agent it is a copy of. */
+  readonly forkedFrom?: string | undefined;
+  /** What it was made for — an `agent.asked`, an `agent.fork`, a room from the + — so an ask heard twice makes one. */
+  readonly answers?: string | undefined;
 }
 
 /** What the bridge keeps across restarts beside the SDK's own store. */
 export interface BridgeState {
   /** `<agent key>|<space id>` → the ACP session that room is. */
   sessions: Record<string, string>;
+  /** The harness's agents, by key. */
+  agents: Record<string, AgentRecord>;
 }
 
 export interface BridgeOptions {
   readonly chips: Chips;
-  readonly agents: readonly AgentConfig[];
-  /** The harness's own room, where its Main agent lives. */
-  readonly home?: string | undefined;
+  readonly kind: KindConfig;
   readonly state: BridgeState;
   readonly saveState: (state: BridgeState) => void;
-  /** How to run an agent: its process, unless a test hands in a wire of its own. */
-  readonly wireFor: (agent: AgentConfig) => Wire;
+  /** How to run the agent: its process, unless a test hands in a wire of its own. */
+  readonly wire: () => Wire;
   readonly log?: ((line: string) => void) | undefined;
-  /** How long to wait before running an agent again after it stopped. */
+  /** How long to wait before running the agent again after it stopped. */
   readonly respawnMs?: number | undefined;
+  /** How long a session may be quiet before it is closed: half an hour unless said. */
+  readonly idleMs?: number | undefined;
 }
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 /** How often a run's status and context gauge may change, so a stream of thoughts isn't a stream of events. */
 const QUIET_MS = 1500;
-/** How long a message waits for its agent to be running again before its run fails. */
+/** How long a message waits for the agent to be running again before its run fails. */
 const WAIT_FOR_AGENT_MS = 15_000;
-/** The longest wait before running an agent again that keeps stopping. */
+/** The longest wait before running the agent again when it keeps stopping. */
 const MOST_RESPAWN_MS = 60_000;
+const IDLE_MS = 30 * 60_000;
 
-/** A Chips agent's key for a configured agent. */
-export function keyOf(agent: Pick<AgentConfig, "name">): string {
-  return `acp:${agent.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-}
-
-interface Running {
-  readonly config: AgentConfig;
-  readonly key: string;
-  agentId: string;
+/** The agent's process: one for every agent of the kind, a session for each of their rooms. */
+interface Process {
   client?: AcpClient | undefined;
   info?: AgentInfo | undefined;
-  /** Sessions loaded or made by this process, so a stored one is loaded once. */
+  /** Sessions open in this process, so a stored one is loaded once. */
   readonly live: Set<string>;
   stopping: boolean;
   /** How many times in a row it stopped without saying hello: the wait to run it again grows. */
   failures: number;
 }
 
-/** A message for one of the harness's Chips agents, and which: the one that answers it. */
+/** A message for one of the harness's agents, and which: the one that answers it. */
 interface Asked {
   readonly message: MessageNew;
-  /** The Chips agent it was for, or none where Chips named only the harness. */
+  /** The agent it was for, or none where Chips named only the harness. */
   readonly speakerId: string | undefined;
 }
 
-/** One room's session, and the turn going in it. */
+/** One agent's session in one room, and the turn going in it. */
 interface Room {
-  readonly agent: Running;
+  readonly record: AgentRecord;
   readonly spaceId: string;
   readonly queue: Asked[];
   busy: boolean;
   turn?: Turn | undefined;
+  /** When it last ended a turn, for closing it once it has been quiet a while. */
+  usedAt: number;
 }
 
 /** The turn going in a room: its run, and what the agent has streamed into it. */
@@ -113,7 +136,7 @@ interface Turn {
   readonly run: Run;
   /** Who it is said as: the Chips agent the message was for. */
   readonly speaker: Speaker;
-  /** The agent's name, for what Chips is told it ran on: ACP doesn't say the model. */
+  /** What it ran on, for the gauge and the cost: ACP doesn't say the model, so the kind. */
   readonly agentName: string;
   /** The room's session, once it is open: empty until then. */
   sessionId: string;
@@ -135,134 +158,439 @@ interface Turn {
 }
 
 export class Bridge {
-  private readonly agents: Running[] = [];
+  private readonly process: Process = { live: new Set(), stopping: false, failures: 0 };
   private readonly rooms = new Map<string, Room>();
-  /** The cost each session has run up, as its agent last said. */
+  /** The cost each session has run up, as the agent last said. */
   private readonly costs = new Map<string, number>();
-  /** Every Chips agent of the harness's, configured here or not. */
-  private ours = new Set<string>();
   private readonly log: (line: string) => void;
+  /** What Chips asks waits for the agents to be known: they are read at start. */
+  private readonly known: Promise<void>;
+  private knew: () => void = () => undefined;
+  /** Records are made one at a time, so two never take the same folder. */
+  private making: Promise<unknown> = Promise.resolve();
+  private sweeper?: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
+    this.known = new Promise((resolve) => {
+      this.knew = resolve;
+    });
   }
 
-  /** Register the agents, run them, and start hearing what is said to them. */
+  /** Hear what Chips asks, learn the agents Chips has, run the agent, and close idle sessions. */
   async start(): Promise<void> {
     const { chips } = this.options;
-    const known = await chips.agents.list();
-    // A Main agent Chips has already is kept, under whatever key: a harness has one at most.
-    const main = known.find((agent) => agent.lead);
-    for (const [index, config] of this.options.agents.entries()) {
-      const key = keyOf(config);
-      const kept = index === 0 && main !== undefined && main.key !== key ? main : undefined;
-      const registered = kept ?? (await chips.agents.register({ key, name: config.name, lead: index === 0 }));
-      this.agents.push({ config, key, agentId: registered.agentId, live: new Set(), stopping: false, failures: 0 });
-      if (index === 0) await this.goHome(registered, known);
-    }
-    this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
-    chips.on("message.new", (message) => void this.hear(message));
-    await Promise.all(this.agents.map((agent) => this.run(agent)));
+    const after = (what: string, then: () => Promise<void>) => {
+      void this.known.then(then).catch((error: unknown) => this.log(`${what} went wrong: ${messageOf(error)}`));
+    };
+    chips.on("message.new", (message) => after("a message", () => this.hear(message)));
+    chips.on("agent.asked", (asked) => after("a new agent", () => this.make(asked)));
+    chips.on("agent.fork", (fork) => after("a copy", () => this.copy(fork)));
+    chips.on("event", (event) => after(event.type, () => this.noted(event)));
+    chips.onSpaceAsked((asked) => after("a room from the +", () => this.claim(asked)));
+    await this.know(await chips.agents.list(), { forget: true });
+    this.knew();
+    await this.run();
+    const idleMs = this.options.idleMs ?? IDLE_MS;
+    this.sweeper = setInterval(() => void this.sweep(idleMs), Math.max(10, Math.min(60_000, idleMs / 2)));
+    this.sweeper.unref();
     await this.sayHowItIs();
   }
 
-  /** The Main agent into the harness's own room, in the place of whichever of ours is there. */
-  private async goHome(main: Agent, known: readonly Agent[]): Promise<void> {
-    const { chips, home } = this.options;
-    if (home === undefined || main.spaces.includes(home)) return;
-    const there = known.find((agent) => agent.agentId !== main.agentId && agent.spaces.includes(home));
-    await chips.agents
-      .attach(main.agentId, { spaceId: home, replacing: there?.agentId ?? chips.harnessId })
-      .catch((error: unknown) => this.log(`${main.name} stays out of its home: ${String(error)}`));
-  }
-
-  /** Stop every agent and run them again: a person's Restart. */
+  /** Stop the agent and run it again: a person's Restart. */
   async restart(): Promise<void> {
-    for (const agent of this.agents) {
-      agent.stopping = true;
-      agent.client?.close();
-    }
-    for (const agent of this.agents) agent.stopping = false;
-    await Promise.all(this.agents.map((agent) => this.run(agent)));
+    this.process.stopping = true;
+    this.process.client?.close();
+    this.process.stopping = false;
+    await this.run();
     await this.sayHowItIs();
   }
 
   stop(): void {
-    for (const agent of this.agents) {
-      agent.stopping = true;
-      agent.client?.close();
+    this.process.stopping = true;
+    this.process.client?.close();
+    clearInterval(this.sweeper);
+  }
+
+  // ------------------------------------------------------------------ the agents
+
+  private records(): AgentRecord[] {
+    return Object.values(this.options.state.agents);
+  }
+
+  private save(): void {
+    this.options.saveState(this.options.state);
+  }
+
+  /** One record made at a time. */
+  private one<T>(make: () => Promise<T>): Promise<T> {
+    const made = this.making.then(make, make);
+    this.making = made.catch(() => undefined);
+    return made;
+  }
+
+  /**
+   * The agents Chips has, each kept as a record: a new one — the harness's own, the agent a claim
+   * made, one made while the bridge was away — gets a folder; a renamed one its name. At start, a
+   * record Chips no longer has is forgotten: its agent was deleted while the bridge was away.
+   */
+  private async know(agents: readonly Agent[], { forget = false } = {}): Promise<void> {
+    await this.one(async () => {
+      const { state } = this.options;
+      let changed = false;
+      for (const agent of agents) {
+        const kept = state.agents[agent.key];
+        if (kept !== undefined) {
+          if (kept.agentId === agent.agentId && kept.name === agent.name) continue;
+          kept.agentId = agent.agentId;
+          kept.name = agent.name;
+          changed = true;
+          continue;
+        }
+        // A copy made while the bridge was away works on in its original's folder.
+        const forkedFrom = agent.forkedFrom ?? undefined;
+        const original = this.records().find((each) => forkedFrom !== undefined && each.agentId === forkedFrom);
+        state.agents[agent.key] = {
+          key: agent.key,
+          agentId: agent.agentId,
+          name: agent.name,
+          folder: original?.folder ?? (await this.folderFor(agent.name)),
+          ...(forkedFrom === undefined ? {} : { forkedFrom }),
+        };
+        changed = true;
+      }
+      if (changed) this.save();
+    });
+    if (!forget) return;
+    for (const record of this.records()) {
+      if (!agents.some((agent) => agent.key === record.key)) await this.forget(record.key);
     }
   }
 
-  // ------------------------------------------------------------------ the agents' processes
+  /** A record for an agent Chips is about to be asked to register: a new key, and its folder. */
+  private made(
+    name: string,
+    more: { readonly answers: string; readonly folder?: string; readonly forkedFrom?: string },
+  ): Promise<AgentRecord> {
+    return this.one(async () => {
+      const kept = this.records().find((record) => record.answers === more.answers);
+      if (kept !== undefined) return kept;
+      const record: AgentRecord = {
+        key: `acp:${randomBytes(6).toString("hex")}`,
+        agentId: "",
+        name,
+        folder: more.folder ?? (await this.folderFor(name)),
+        answers: more.answers,
+        ...(more.forkedFrom === undefined ? {} : { forkedFrom: more.forkedFrom }),
+      };
+      this.options.state.agents[record.key] = record;
+      this.save();
+      return record;
+    });
+  }
 
-  private async run(agent: Running): Promise<void> {
-    agent.live.clear();
-    agent.info = undefined;
+  /**
+   * A folder of the agent's own, named after it, made empty: never one another agent has, nor one
+   * on disk already, which a deleted agent may have left. The config's one folder, where it names one.
+   */
+  private async folderFor(name: string): Promise<string> {
+    const { kind } = this.options;
+    if (kind.folder !== undefined) {
+      await mkdir(kind.folder, { recursive: true });
+      return kind.folder;
+    }
+    const base = slugOf(name).replace(/_/g, "-") || "agent";
+    const taken = new Set(this.records().map((record) => record.folder));
+    for (let n = 1; ; n += 1) {
+      const folder = join(kind.folders, n === 1 ? base : `${base}-${n}`);
+      if (taken.has(folder) || existsSync(folder)) continue;
+      await mkdir(folder, { recursive: true });
+      return folder;
+    }
+  }
+
+  /** The record a Chips agent is, read afresh once when it is new to the bridge. */
+  private async recordOf(agentId: string): Promise<AgentRecord | undefined> {
+    const find = () => this.records().find((record) => record.agentId === agentId);
+    const found = find();
+    if (found !== undefined) return found;
+    await this.know(await this.options.chips.agents.list().catch(() => []));
+    return find();
+  }
+
+  /** Registered: the record takes Chips's id and name, which Chips may have numbered. */
+  private registered(record: AgentRecord, agent: Agent): void {
+    record.agentId = agent.agentId;
+    record.name = agent.name;
+    this.save();
+  }
+
+  /**
+   * A person asked for a new agent in a room (ADR 0108): a record and a folder of its own, then
+   * registered for the room, which Chips puts it in.
+   */
+  private async make(asked: AgentAsked): Promise<void> {
+    const { chips } = this.options;
+    if (asked.harness_id !== chips.harnessId || asked.space_id === undefined) return;
+    const record = await this.made(asked.name, { answers: asked.id });
+    try {
+      const agent = await chips.agents.register({
+        key: record.key,
+        name: asked.name,
+        madeFor: asked.id,
+        spaceId: asked.space_id,
+      });
+      this.registered(record, agent);
+      this.log(`${agent.name} made, in ${record.folder}${agent.attached === false ? `; not in the room: ${agent.why ?? "late"}` : ""}`);
+    } catch (error) {
+      if (record.agentId === "") delete this.options.state.agents[record.key];
+      this.save();
+      throw error;
+    }
+  }
+
+  /**
+   * A person asked for a copy of an agent in a room (ADR 0087, Fork): the agent's session in the
+   * room it is in, copied with `session/fork` in the same folder, is the copy's session in the room
+   * asked; the copy is registered for it. One that never spoke there is copied as a new agent in
+   * the same folder. A session that won't copy makes no copy: Chips tells the person.
+   */
+  private async copy(fork: AgentFork): Promise<void> {
+    const { chips, state } = this.options;
+    const spaceId = fork.space_id;
+    if (spaceId === undefined) return;
+    const original = await this.recordOf(fork.agent_id);
+    if (original === undefined) return;
+    let record = this.records().find((each) => each.answers === fork.id);
+    if (record === undefined) {
+      const from = await this.sessionOf(original);
+      let copied: string | undefined;
+      if (from !== undefined) {
+        const client = await this.running();
+        if (client === undefined || this.process.info?.forkSession !== true) {
+          this.log(`${original.name} can't be copied: ${client === undefined ? "the agent isn't running" : "the agent doesn't copy sessions"}`);
+          return;
+        }
+        copied = await client.forkSession(from, original.folder);
+        this.process.live.add(copied);
+        await this.moded(client, copied);
+      }
+      record = await this.made(forkName(original.name), {
+        answers: fork.id,
+        folder: original.folder,
+        forkedFrom: original.agentId,
+      });
+      if (copied !== undefined) {
+        state.sessions[`${record.key}|${spaceId}`] = copied;
+        this.save();
+      }
+    }
+    const agent = await chips.agents.register({
+      key: record.key,
+      name: record.name,
+      forkedFrom: original.agentId,
+      spaceId,
+    });
+    this.registered(record, agent);
+    this.log(`${agent.name}, a copy of ${original.name}, made${agent.attached === false ? `; not in the room: ${agent.why ?? "late"}` : ""}`);
+  }
+
+  /** The session to copy of an agent: its room's, or where it is in none, the last it had. */
+  private async sessionOf(record: AgentRecord): Promise<string | undefined> {
+    const { chips, state } = this.options;
+    const room = (await chips.agents.list().catch(() => [])).find((agent) => agent.agentId === record.agentId)?.room;
+    if (room !== undefined && room !== null) return state.sessions[`${record.key}|${room}`];
+    return Object.entries(state.sessions).findLast(([id]) => id.startsWith(`${record.key}|`))?.[1];
+  }
+
+  /**
+   * A room a person asked for from the + (or beside another harness): claimed under a new key,
+   * which Chips makes an agent for and puts in the room; the agent gets a record and a folder, and
+   * answers the first words.
+   */
+  private async claim(asked: SpaceAsked): Promise<void> {
+    const { chips } = this.options;
+    const { spaceId, firstMessage } = asked;
+    const key = this.records().find((record) => record.answers === spaceId)?.key ?? `acp:${randomBytes(6).toString("hex")}`;
+    await chips.claimSpace(spaceId, key, titleFrom(firstMessage.text));
+    const agent = (await chips.agents.list()).find((each) => each.key === key);
+    if (agent === undefined) {
+      this.log(`claimed ${spaceId}, and Chips put no agent there`);
+      return;
+    }
+    const record =
+      this.options.state.agents[key] ??
+      (await this.one(async () => {
+        const made: AgentRecord = {
+          key,
+          agentId: agent.agentId,
+          name: agent.name,
+          folder: await this.folderFor(agent.name),
+          answers: spaceId,
+        };
+        this.options.state.agents[key] = made;
+        this.save();
+        return made;
+      }));
+    this.log(`${agent.name} claimed ${spaceId}, in ${record.folder}`);
+    // The first words are the ask's, not heard again as a message: said to the agent as one.
+    const message = {
+      type: "message.new",
+      space_id: spaceId,
+      message_id: firstMessage.messageId,
+      text: firstMessage.text,
+      from: { participant_id: asked.askedBy, kind: "person", display_name: await this.whoSaid(asked), role: "member" },
+      for: [agent.agentId],
+    } as unknown as MessageNew;
+    const room = this.roomOf(record, spaceId);
+    room.queue.push({ message, speakerId: agent.agentId });
+    void this.pump(room);
+  }
+
+  /** Who said a room's first words, from the room's lines. */
+  private async whoSaid(asked: SpaceAsked): Promise<string> {
+    const context = await this.options.chips.roomContext(asked.spaceId, { limit: 20 }).catch(() => undefined);
+    return context?.lines.find((line) => line.message_id === asked.firstMessage.messageId)?.from.name ?? "Someone";
+  }
+
+  /**
+   * What else of the harness's agents a person changed: a delete forgets one, a rename names it.
+   * Workspace events, which the SDK's own list of a harness's events doesn't type.
+   */
+  private async noted(event: AnyEvent): Promise<void> {
+    const heard = event as unknown as Readonly<Record<string, unknown>>;
+    if (heard["type"] === "agent.deleted") {
+      if (heard["harness_id"] === this.options.chips.harnessId) await this.forget(String(heard["key"]));
+      return;
+    }
+    const name = heard["name"];
+    if (heard["type"] !== "agent.updated" || typeof name !== "string") return;
+    const record = this.records().find((each) => each.agentId === heard["agent_id"]);
+    if (record === undefined || record.name === name) return;
+    this.log(`${record.name} is ${name} now`);
+    record.name = name;
+    this.save();
+  }
+
+  /** A deleted agent: its sessions closed and its record gone. Its folder stays: what it wrote is a person's to delete. */
+  private async forget(key: string): Promise<void> {
+    const { state } = this.options;
+    const record = state.agents[key];
+    if (record === undefined) return;
+    delete state.agents[key];
+    for (const [id, room] of this.rooms) {
+      if (room.record.key !== key) continue;
+      room.queue.length = 0;
+      if (room.turn !== undefined && room.turn.sessionId !== "") this.process.client?.cancel(room.turn.sessionId);
+      this.rooms.delete(id);
+    }
+    for (const [id, sessionId] of Object.entries(state.sessions)) {
+      if (!id.startsWith(`${key}|`)) continue;
+      delete state.sessions[id];
+      if (this.process.live.delete(sessionId) && this.process.info?.closeSession === true) {
+        await this.process.client?.closeSession(sessionId).catch(() => undefined);
+      }
+    }
+    this.save();
+    this.log(`${record.name} deleted; its folder stays, ${record.folder}`);
+  }
+
+  // ------------------------------------------------------------------ the agent's process
+
+  private async run(): Promise<void> {
+    const proc = this.process;
+    const { name } = this.options.kind;
+    proc.live.clear();
+    proc.info = undefined;
     let wire: Wire;
     try {
-      wire = this.options.wireFor(agent.config);
+      wire = this.options.wire();
     } catch (error) {
-      this.log(`${agent.config.name} didn't start: ${String(error)}`);
+      this.log(`${name} didn't start: ${String(error)}`);
       return;
     }
     const client = new AcpClient(wire, {
       update: (sessionId, update) => this.updated(sessionId, update),
       request: (request) => this.asked(request),
-      exit: (why) => void this.stopped(agent, client, why),
+      exit: (why) => void this.stopped(client, why),
     });
-    agent.client = client;
+    proc.client = client;
     try {
-      agent.info = await client.initialize({ name: "chips-acp", version: VERSION });
-      agent.failures = 0;
-      this.log(`${agent.config.name} is running${agent.info.name === undefined ? "" : ` (${agent.info.name})`}`);
+      proc.info = await client.initialize({ name: "chips-acp", version: VERSION });
+      proc.failures = 0;
+      this.log(`${name} is running${proc.info.name === undefined ? "" : ` (${proc.info.name})`}`);
     } catch (error) {
-      this.log(`${agent.config.name} didn't say hello: ${String(error)}`);
+      this.log(`${name} didn't say hello: ${String(error)}`);
       client.close();
     }
   }
 
-  private async stopped(agent: Running, client: AcpClient, why: string): Promise<void> {
-    if (agent.client !== client) return;
-    agent.client = undefined;
+  private async stopped(client: AcpClient, why: string): Promise<void> {
+    const proc = this.process;
+    const { name } = this.options.kind;
+    if (proc.client !== client) return;
+    proc.client = undefined;
     for (const room of this.rooms.values()) {
-      if (room.agent !== agent || room.turn === undefined) continue;
+      if (room.turn === undefined) continue;
       room.turn.cancelled = true;
       if (!room.turn.run.over) {
-        await room.turn.run.fail({ error: `${agent.config.name} stopped (${why}).`, retryable: true }).catch(() => undefined);
+        await room.turn.run.fail({ error: `${name} stopped (${why}).`, retryable: true }).catch(() => undefined);
       }
     }
-    if (agent.stopping) return;
-    if (agent.info === undefined) agent.failures += 1;
-    this.log(`${agent.config.name} stopped: ${why}`);
+    if (proc.stopping) return;
+    if (proc.info === undefined) proc.failures += 1;
+    this.log(`${name} stopped: ${why}`);
     await this.sayHowItIs();
-    const wait = Math.min((this.options.respawnMs ?? 2000) * 2 ** agent.failures, MOST_RESPAWN_MS);
+    const wait = Math.min((this.options.respawnMs ?? 2000) * 2 ** proc.failures, MOST_RESPAWN_MS);
     setTimeout(() => {
-      if (agent.client === undefined && !agent.stopping) void this.run(agent).then(() => this.sayHowItIs());
+      if (proc.client === undefined && !proc.stopping) void this.run().then(() => this.sayHowItIs());
     }, wait).unref();
   }
 
   /** The agent's connection once it is running and has said hello, waiting a while if it is coming back. */
-  private async running(agent: Running): Promise<AcpClient | undefined> {
+  private async running(): Promise<AcpClient | undefined> {
     const by = Date.now() + WAIT_FOR_AGENT_MS;
-    while (!agent.stopping) {
-      const client = agent.client;
-      if (client !== undefined && !client.gone && agent.info !== undefined) return client;
+    while (!this.process.stopping) {
+      const client = this.process.client;
+      if (client !== undefined && !client.gone && this.process.info !== undefined) return client;
       if (Date.now() > by) return undefined;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     return undefined;
   }
 
-  /** Trouble while an agent isn't running, and fine once all are (ADR 0083). */
+  /** Trouble while the agent isn't running, and fine once it is (ADR 0083). */
   private async sayHowItIs(): Promise<void> {
-    const down = this.agents.filter((agent) => agent.client === undefined || agent.client.gone);
-    const chips = this.options.chips;
-    const said =
-      down.length === 0
-        ? chips.reportOk()
-        : chips.reportTrouble(`${down.map((agent) => agent.config.name).join(", ")} isn't running`);
+    const { chips, kind } = this.options;
+    const client = this.process.client;
+    const said = client === undefined || client.gone ? chips.reportTrouble(`${kind.name} isn't running`) : chips.reportOk();
     await said.catch(() => undefined);
+  }
+
+  /**
+   * Sessions quiet for `idleMs`, closed: each open Claude Code session keeps a process of its own.
+   * Only where the agent loads them again, so nothing it remembers is lost.
+   */
+  private async sweep(idleMs: number): Promise<void> {
+    const { client, info, live } = this.process;
+    if (client === undefined || client.gone || info?.closeSession !== true || !info.loadSession) return;
+    const quietSince = Date.now() - idleMs;
+    for (const [id, room] of this.rooms) {
+      if (room.busy || room.queue.length > 0 || room.usedAt > quietSince) continue;
+      const sessionId = this.options.state.sessions[id];
+      if (sessionId === undefined || !live.has(sessionId)) continue;
+      room.busy = true;
+      try {
+        await client.closeSession(sessionId);
+        live.delete(sessionId);
+        this.log(`${room.record.name}'s session in ${room.spaceId} closed, quiet ${Math.round(idleMs / 60_000)} min`);
+      } catch (error) {
+        this.log(`${room.record.name}'s session in ${room.spaceId} stays open: ${messageOf(error)}`);
+      } finally {
+        room.busy = false;
+        void this.pump(room);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ what is said to it
@@ -273,34 +601,27 @@ export class Bridge {
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
     for (const taker of message.for ?? [harnessId]) {
-      const agent = await this.runnerOf(taker);
-      if (agent === undefined) continue;
-      const room = this.roomOf(agent, spaceId);
+      const record = taker === harnessId ? await this.inRoom(spaceId) : await this.recordOf(taker);
+      if (record === undefined) continue;
+      const room = this.roomOf(record, spaceId);
       room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker });
       void this.pump(room);
     }
   }
 
-  /**
-   * Which configured agent answers for a Chips agent: its own, or the first for the harness itself
-   * and for any other of the harness's — its default agent, one Chips made since — read afresh once
-   * when a name is new.
-   */
-  private async runnerOf(taker: string): Promise<Running | undefined> {
-    const own = this.agents.find((agent) => agent.agentId === taker);
-    if (own !== undefined) return own;
-    if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) {
-      const listed = await this.options.chips.agents.list().catch(() => []);
-      for (const agent of listed) this.ours.add(agent.agentId);
-    }
-    return taker === this.options.chips.harnessId || this.ours.has(taker) ? this.agents[0] : undefined;
+  /** For the harness itself: its agent in the room, else its own. */
+  private async inRoom(spaceId: string): Promise<AgentRecord | undefined> {
+    const agents = await this.options.chips.agents.list().catch(() => []);
+    await this.know(agents);
+    const here = agents.find((agent) => agent.room === spaceId)?.key ?? this.options.chips.harnessId;
+    return this.options.state.agents[here];
   }
 
-  private roomOf(agent: Running, spaceId: string): Room {
-    const id = `${agent.key}|${spaceId}`;
+  private roomOf(record: AgentRecord, spaceId: string): Room {
+    const id = `${record.key}|${spaceId}`;
     let room = this.rooms.get(id);
     if (room === undefined) {
-      room = { agent, spaceId, queue: [], busy: false };
+      room = { record, spaceId, queue: [], busy: false, usedAt: Date.now() };
       this.rooms.set(id, room);
     }
     return room;
@@ -314,22 +635,24 @@ export class Bridge {
     try {
       await this.turn(room, asked);
     } catch (error) {
-      this.log(`a turn of ${room.agent.config.name} went wrong: ${String(error)}`);
+      this.log(`a turn of ${room.record.name} went wrong: ${String(error)}`);
     } finally {
       room.busy = false;
       room.turn = undefined;
+      room.usedAt = Date.now();
       void this.pump(room);
     }
   }
 
   private async turn(room: Room, { message, speakerId }: Asked): Promise<void> {
-    const { agent, spaceId } = room;
+    const { record, spaceId } = room;
+    const { kind } = this.options;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
-    const run = await speaker.runs.start({ spaceId, goal: goalOf(message, agent.config.name) });
+    const run = await speaker.runs.start({ spaceId, goal: goalOf(message, record.name) });
     const turn: Turn = {
       run,
       speaker,
-      agentName: agent.config.name,
+      agentName: kind.name,
       sessionId: "",
       reply: "",
       said: [],
@@ -345,28 +668,28 @@ export class Bridge {
     // Heard from the start, so a Stop while the session is still opening stops it too.
     run.on("cancel", () => {
       turn.cancelled = true;
-      if (turn.sessionId !== "") agent.client?.cancel(turn.sessionId);
+      if (turn.sessionId !== "") this.process.client?.cancel(turn.sessionId);
     });
     run.on("steer", (steer) => {
       turn.next.push(`${steer.from?.display_name ?? "The person"} adds: ${steer.text}`);
-      if (steer.mode === "interrupt" && turn.sessionId !== "") agent.client?.cancel(turn.sessionId);
+      if (steer.mode === "interrupt" && turn.sessionId !== "") this.process.client?.cancel(turn.sessionId);
     });
-    const client = await this.running(agent);
+    const client = await this.running();
     if (client === undefined) {
-      if (!run.over) await run.fail({ error: `${agent.config.name} isn't running right now.`, retryable: true });
+      if (!run.over) await run.fail({ error: `${kind.name} isn't running right now.`, retryable: true });
       return;
     }
     try {
-      turn.sessionId = await this.sessionFor(agent, client, spaceId);
+      turn.sessionId = await this.sessionFor(record, client, spaceId);
     } catch (error) {
-      if (!run.over) await run.fail({ error: `${agent.config.name} couldn't open a session: ${messageOf(error)}` });
+      if (!run.over) await run.fail({ error: `${record.name} couldn't open a session: ${messageOf(error)}` });
       return;
     }
     const { sessionId } = turn;
     turn.costAtStart = this.costs.get(sessionId);
 
     let words = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
-    const files = await this.filesFor(agent, message);
+    const files = await this.filesFor(record, message);
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
     if (turn.cancelled) return;
     let stop = "end_turn";
@@ -374,7 +697,7 @@ export class Bridge {
       try {
         stop = await client.prompt(sessionId, [{ type: "text", text: prompt }]);
       } catch (error) {
-        if (!run.over) await run.fail({ error: `${agent.config.name}: ${messageOf(error)}`, retryable: true });
+        if (!run.over) await run.fail({ error: `${record.name}: ${messageOf(error)}`, retryable: true });
         return;
       }
       if (turn.cancelled) return;
@@ -384,44 +707,46 @@ export class Bridge {
     await this.finish(room, turn, stop);
   }
 
-  /** The room's session: the one it had, loaded once, or a new one. */
-  private async sessionFor(agent: Running, client: AcpClient, spaceId: string): Promise<string> {
-    const key = `${agent.key}|${spaceId}`;
-    const kept = this.options.state.sessions[key];
-    if (kept !== undefined && agent.live.has(kept)) return kept;
-    if (kept !== undefined && agent.info?.loadSession === true) {
+  /** The room's session: the one it had, loaded once, or a new one, in the agent's folder. */
+  private async sessionFor(record: AgentRecord, client: AcpClient, spaceId: string): Promise<string> {
+    const { state } = this.options;
+    const { live, info } = this.process;
+    const key = `${record.key}|${spaceId}`;
+    const kept = state.sessions[key];
+    if (kept !== undefined && live.has(kept)) return kept;
+    if (kept !== undefined && info?.loadSession === true) {
       try {
-        await client.loadSession(kept, agent.config.cwd);
-        agent.live.add(kept);
-        await this.moded(agent, client, kept);
+        await client.loadSession(kept, record.folder);
+        live.add(kept);
+        await this.moded(client, kept);
         return kept;
       } catch (error) {
-        this.log(`${agent.config.name} couldn't load ${kept}: ${messageOf(error)}; starting afresh`);
+        this.log(`${record.name} couldn't load ${kept}: ${messageOf(error)}; starting afresh`);
       }
     }
-    const made = await client.newSession(agent.config.cwd);
-    agent.live.add(made.sessionId);
-    await this.moded(agent, client, made.sessionId);
-    this.options.state.sessions[key] = made.sessionId;
-    this.options.saveState(this.options.state);
+    const made = await client.newSession(record.folder);
+    live.add(made.sessionId);
+    await this.moded(client, made.sessionId);
+    state.sessions[key] = made.sessionId;
+    this.save();
     return made.sessionId;
   }
 
   /** The session into the mode the config names, or left in its own when the agent won't. */
-  private async moded(agent: Running, client: AcpClient, sessionId: string): Promise<void> {
-    const mode = agent.config.mode;
+  private async moded(client: AcpClient, sessionId: string): Promise<void> {
+    const { mode, name } = this.options.kind;
     if (mode === undefined) return;
     await client
       .setMode(sessionId, mode)
-      .catch((error: unknown) => this.log(`${agent.config.name} stays in its own mode, not ${mode}: ${messageOf(error)}`));
+      .catch((error: unknown) => this.log(`${name} stays in its own mode, not ${mode}: ${messageOf(error)}`));
   }
 
   /** The message's files, saved where the agent works, as lines that say where. */
-  private async filesFor(agent: Running, message: MessageNew): Promise<string[]> {
+  private async filesFor(record: AgentRecord, message: MessageNew): Promise<string[]> {
     const lines: string[] = [];
     for (const file of message.attachments ?? []) {
       try {
-        const folder = join(agent.config.cwd, "chips-files", message.message_id);
+        const folder = join(record.folder, "chips-files", message.message_id);
         await mkdir(folder, { recursive: true });
         const path = join(folder, file.filename.replace(/[/\\]/g, "_"));
         await writeFile(path, await this.options.chips.download(file));
@@ -444,10 +769,10 @@ export class Bridge {
     const spent = (turn.cost ?? 0) - (turn.costAtStart ?? 0);
     if (turn.cost !== undefined && spent > 0) {
       // ACP says what a session has cost, not its tokens: the cost alone (Chips ADR 0162).
-      await run.usage({ model: room.agent.config.name, costUsd: spent }).catch(() => undefined);
+      await run.usage({ model: turn.agentName, costUsd: spent }).catch(() => undefined);
     }
     if (stop === "refusal") {
-      await run.fail({ error: `${room.agent.config.name} refused.` });
+      await run.fail({ error: `${room.record.name} refused.` });
       return;
     }
     // Its last words; when it ended on a tool call, the words before it.
@@ -457,7 +782,7 @@ export class Bridge {
     const summary = reply === "" ? "Done." : reply.length <= 2000 ? reply : `${reply.slice(0, 1990)}…`;
     await run.complete({
       summary,
-      ...(cut ? { followUps: [`${room.agent.config.name} stopped at its limit (${stop}).`] } : {}),
+      ...(cut ? { followUps: [`${room.record.name} stopped at its limit (${stop}).`] } : {}),
     });
   }
 
@@ -757,4 +1082,17 @@ function questionOf(
     prompt,
     options: choices.map((value, index) => ({ value, label: names[index] ?? value })),
   };
+}
+
+/** A room's title from its first words: their first line, cut at a word near 48 characters. */
+export function titleFrom(text: string): string {
+  const line = text.trim().split("\n")[0] ?? "";
+  if (line.length <= 48) return line;
+  const cut = line.slice(0, 48);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 24))}…`;
+}
+
+/** A copy's name, as Jacobian names its forks: `Nova · fork`, which Chips numbers when it is taken. */
+export function forkName(original: string): string {
+  return `${original.trim().replace(/ · fork( \d+)?$/, "")} · fork`;
 }

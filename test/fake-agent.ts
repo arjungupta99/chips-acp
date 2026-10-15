@@ -12,8 +12,9 @@
  * - `die`: its process goes away mid-turn.
  * - `narrate`: it says what it will do, reads a file, and then answers.
  *
- * With `askFirst`, anything else asks permission to write the tracker first, as a real agent asks
- * before it changes something.
+ * With `askFirst`, anything else said in the first session it made asks permission to write the
+ * tracker first, as a real agent asks before it changes something. It copies sessions (`session/fork`) unless `fork` is false, and
+ * closes them (`session/close`) when `close` is true.
  */
 
 import type { Wire } from "../src/acp.ts";
@@ -28,17 +29,27 @@ export interface FakeAgent {
   readonly cancels: string[];
   /** `<session>:<mode>` for each mode it was put in. */
   readonly modes: string[];
+  /** The folder each session was made, loaded or copied in, by session. */
+  readonly cwds: Map<string, string>;
+  /** `<session>><copy>` for each session it copied. */
+  readonly forks: string[];
+  readonly closed: string[];
   /** How many times it was started. */
   starts: number;
 }
 
-export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean } = {}): FakeAgent {
+export function fakeAgent(
+  options: { loadSession?: boolean; askFirst?: boolean; fork?: boolean; close?: boolean } = {},
+): FakeAgent {
   const agent: FakeAgent = {
     prompts: [],
     made: [],
     loaded: [],
     cancels: [],
     modes: [],
+    cwds: new Map(),
+    forks: [],
+    closed: [],
     starts: 0,
     wire: () => {
       agent.starts += 1;
@@ -128,7 +139,7 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
           reply("end_turn");
           return;
         }
-        if (options.askFirst === true) {
+        if (options.askFirst === true && sessionId === agent.made[0]) {
           await ask("session/request_permission", {
             sessionId,
             toolCall: { toolCallId: "t0", title: "Edit tracker.md", kind: "edit", rawInput: { path: "tracker.md" } },
@@ -179,7 +190,13 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
               id,
               result: {
                 protocolVersion: 1,
-                agentCapabilities: { loadSession: options.loadSession === true },
+                agentCapabilities: {
+                  loadSession: options.loadSession === true,
+                  sessionCapabilities: {
+                    ...(options.fork === false ? {} : { fork: {} }),
+                    ...(options.close === true ? { close: {} } : {}),
+                  },
+                },
                 agentInfo: { name: "fake-agent" },
               },
             });
@@ -187,12 +204,27 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
           case "session/new": {
             const sessionId = `sess-${agent.made.length + agent.loaded.length + 1}-${agent.starts}`;
             agent.made.push(sessionId);
+            agent.cwds.set(sessionId, String(params["cwd"]));
             send({ id, result: { sessionId } });
             return;
           }
           case "session/load":
             agent.loaded.push(String(params["sessionId"]));
+            agent.cwds.set(String(params["sessionId"]), String(params["cwd"]));
             send({ id, result: null });
+            return;
+          case "session/fork": {
+            if (options.fork === false) break;
+            const sessionId = `fork-${agent.forks.length + 1}`;
+            agent.forks.push(`${String(params["sessionId"])}>${sessionId}`);
+            agent.cwds.set(sessionId, String(params["cwd"]));
+            send({ id, result: { sessionId } });
+            return;
+          }
+          case "session/close":
+            if (options.close !== true) break;
+            agent.closed.push(String(params["sessionId"]));
+            send({ id, result: {} });
             return;
           case "session/prompt": {
             const blocks = (params["prompt"] ?? []) as { text?: string }[];
@@ -208,8 +240,9 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
             cancelled.add(String(params["sessionId"]));
             return;
           default:
-            if (id !== undefined) send({ id, error: { code: -32601, message: "no such method" } });
+            break;
         }
+        if (id !== undefined) send({ id, error: { code: -32601, message: "no such method" } });
       };
 
       return {

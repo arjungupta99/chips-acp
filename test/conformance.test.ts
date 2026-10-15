@@ -1,6 +1,7 @@
 /**
  * The conformance kit's golden scenario, played against the bridge with an ACP agent in this
- * process: what `chips conformance custom --capabilities agents,restarts` checks of it live.
+ * process: what `chips conformance custom --capabilities agents,new_spaces,new_agents,forks,restarts`
+ * checks of it live.
  */
 
 import { strict as assert } from "node:assert";
@@ -21,7 +22,7 @@ it("passes the golden scenario", async () => {
     beatTimeoutMs: 3000,
     subject: {
       name: "chips-acp",
-      capabilities: ["agents", "restarts"],
+      capabilities: ["agents", "new_spaces", "new_agents", "forks", "restarts"],
       start: async (address) => {
         // As main.ts connects: a person's Restart starts the agents again.
         client = await connect({
@@ -33,11 +34,10 @@ it("passes the golden scenario", async () => {
         });
         bridge = new Bridge({
           chips: client,
-          agents: [{ name: "Fakey", command: ["fake"], cwd: mkdtempSync(join(tmpdir(), "chips-acp-")) }],
-          home: address.spaceId,
-          state: { sessions: {} },
+          kind: { name: "Fakey", command: ["fake"], folders: mkdtempSync(join(tmpdir(), "chips-acp-")) },
+          state: { sessions: {}, agents: {} },
           saveState: () => undefined,
-          wireFor: () => agent.wire(),
+          wire: () => agent.wire(),
         });
         await bridge.start();
       },
@@ -53,18 +53,26 @@ it("passes the golden scenario", async () => {
     [],
     formatReport(report).join("\n"),
   );
-  // Supervised, and in Chips as far as a person's Restart: the level the gallery says.
+  // Supervised, and in Chips but for following its rooms: the level the gallery says.
   assert.deepEqual(
     report.levels.map((level) => [level.label, level.has]),
     [
       ["Talks", 1],
       ["Supervised", 1],
-      ["Lives in Chips", 2],
+      ["Lives in Chips", 5],
       ["Managed from Chips", 0],
     ],
   );
-  assert.deepEqual(report.levels[2]?.capabilities, [
-    { capability: "agents", outcome: "declared" },
-    { capability: "restarts", outcome: "passed" },
-  ]);
+  const outcomes = Object.fromEntries(
+    (report.levels[2]?.capabilities ?? []).map((each) => [each.capability, each.outcome]),
+  );
+  assert.deepEqual(outcomes, {
+    agents: "declared",
+    new_spaces: "passed",
+    forks: "passed",
+    new_agents: "passed",
+    restarts: "passed",
+    ...(outcomes["follows_rooms"] === undefined ? {} : { follows_rooms: outcomes["follows_rooms"] }),
+  });
+  assert.notEqual(outcomes["follows_rooms"], "passed");
 });
