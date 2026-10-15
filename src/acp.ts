@@ -1,8 +1,8 @@
 /**
  * One ACP agent, as a process this bridge runs: JSON-RPC 2.0, a message per line, over the
  * agent's stdin and stdout (the Agent Client Protocol's stdio transport, v1). The bridge is the
- * client: it calls `initialize`, `session/new`, `session/load`, `session/prompt`,
- * `session/set_config_option`, and notifies `session/cancel`; the agent notifies `session/update`
+ * client: it calls `initialize`, `session/new`, `session/load`, `session/fork`, `session/close`,
+ * `session/prompt`, `session/set_mode`, `session/set_config_option`, and notifies `session/cancel`; the agent notifies `session/update`
  * and asks `session/request_permission` and `elicitation/create`, which the bridge answers.
  *
  * The client offers the agent no file system and no terminal: the agent works with its own tools,
@@ -37,6 +37,10 @@ export class AcpError extends Error {
 export interface AgentInfo {
   readonly protocolVersion: number;
   readonly loadSession: boolean;
+  /** Whether it closes a session it was asked to (`session/close`), so idle ones can be let go. */
+  readonly closeSession: boolean;
+  /** Whether it copies a session (`session/fork`): what Fork in Chips needs. */
+  readonly forkSession: boolean;
   readonly images: boolean;
   readonly authMethods: readonly { readonly id: string; readonly name: string }[];
   readonly name?: string | undefined;
@@ -132,9 +136,12 @@ export class AcpClient {
     const capabilities = (answer["agentCapabilities"] ?? {}) as Record<string, unknown>;
     const prompts = (capabilities["promptCapabilities"] ?? {}) as Record<string, unknown>;
     const info = (answer["agentInfo"] ?? {}) as Record<string, unknown>;
+    const sessions = (capabilities["sessionCapabilities"] ?? {}) as Record<string, unknown>;
     return {
       protocolVersion: Number(answer["protocolVersion"] ?? ACP_VERSION),
       loadSession: capabilities["loadSession"] === true,
+      closeSession: sessions["close"] !== undefined && sessions["close"] !== null,
+      forkSession: sessions["fork"] !== undefined && sessions["fork"] !== null,
       images: prompts["image"] === true,
       authMethods: Array.isArray(answer["authMethods"])
         ? (answer["authMethods"] as { id: string; name: string }[])
@@ -163,6 +170,18 @@ export class AcpClient {
       | null
       | undefined;
     return { configOptions: configOptionsOf(answer ?? {}) };
+  }
+
+  /** A copy of a session, remembering everything it does, working in `cwd`. Answers with the copy's id. */
+  async forkSession(sessionId: string, cwd: string, mcpServers: readonly unknown[] = []): Promise<string> {
+    const answer = (await this.call("session/fork", { sessionId, cwd, mcpServers })) as Record<string, unknown>;
+    if (typeof answer["sessionId"] !== "string") throw new AcpError("the agent copied the session and named no copy", -32000);
+    return answer["sessionId"];
+  }
+
+  /** Let a session go: the agent keeps it, and `session/load` brings it back. */
+  async closeSession(sessionId: string): Promise<void> {
+    await this.call("session/close", { sessionId });
   }
 
   /** The session's mode, one of those it offers: Claude Code's `default`, Codex's `workspace-write`. */
