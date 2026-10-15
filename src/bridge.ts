@@ -38,6 +38,12 @@ export interface AgentConfig {
   readonly cwd: string;
   /** More environment for its process, beside this one's. */
   readonly env?: Readonly<Record<string, string>> | undefined;
+  /**
+   * The mode its sessions are put in, of those it offers. Claude Code's `default` asks before each
+   * change and Codex's `workspace-write` before the network or outside its folder, so the asks reach
+   * Chips as cards; their own modes (`auto`, `agent`) let the agent decide. Its own when absent.
+   */
+  readonly mode?: string | undefined;
 }
 
 /** What the bridge keeps across restarts beside the SDK's own store. */
@@ -107,9 +113,14 @@ interface Turn {
   readonly run: Run;
   /** Who it is said as: the Chips agent the message was for. */
   readonly speaker: Speaker;
+  /** The agent's name, for what Chips is told it ran on: ACP doesn't say the model. */
+  readonly agentName: string;
   /** The room's session, once it is open: empty until then. */
   sessionId: string;
+  /** Its words since its last tool call: the reply, unless more come after another. */
   reply: string;
+  /** Its words before a tool call, which were on the way. */
+  readonly said: string[];
   thought: string;
   /** More to say to it in this run: a person's steer. */
   readonly next: string[];
@@ -318,8 +329,10 @@ export class Bridge {
     const turn: Turn = {
       run,
       speaker,
+      agentName: agent.config.name,
       sessionId: "",
       reply: "",
+      said: [],
       thought: "",
       next: [],
       cancelled: false,
@@ -380,6 +393,7 @@ export class Bridge {
       try {
         await client.loadSession(kept, agent.config.cwd);
         agent.live.add(kept);
+        await this.moded(agent, client, kept);
         return kept;
       } catch (error) {
         this.log(`${agent.config.name} couldn't load ${kept}: ${messageOf(error)}; starting afresh`);
@@ -387,9 +401,19 @@ export class Bridge {
     }
     const made = await client.newSession(agent.config.cwd);
     agent.live.add(made.sessionId);
+    await this.moded(agent, client, made.sessionId);
     this.options.state.sessions[key] = made.sessionId;
     this.options.saveState(this.options.state);
     return made.sessionId;
+  }
+
+  /** The session into the mode the config names, or left in its own when the agent won't. */
+  private async moded(agent: Running, client: AcpClient, sessionId: string): Promise<void> {
+    const mode = agent.config.mode;
+    if (mode === undefined) return;
+    await client
+      .setMode(sessionId, mode)
+      .catch((error: unknown) => this.log(`${agent.config.name} stays in its own mode, not ${mode}: ${messageOf(error)}`));
   }
 
   /** The message's files, saved where the agent works, as lines that say where. */
@@ -426,7 +450,8 @@ export class Bridge {
       await run.fail({ error: `${room.agent.config.name} refused.` });
       return;
     }
-    const reply = turn.reply.trim();
+    // Its last words; when it ended on a tool call, the words before it.
+    const reply = turn.reply.trim() || (turn.said.at(-1) ?? "");
     if (reply !== "") await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply });
     const cut = stop === "max_tokens" || stop === "max_turn_requests";
     const summary = reply === "" ? "Done." : reply.length <= 2000 ? reply : `${reply.slice(0, 1990)}…`;
@@ -468,6 +493,9 @@ export class Bridge {
         this.sayThought(turn);
         return;
       case "tool_call":
+        this.onTheWay(turn);
+        void this.stepped(turn, update);
+        return;
       case "tool_call_update":
         void this.stepped(turn, update);
         return;
@@ -499,6 +527,18 @@ export class Bridge {
     void turn.run.status({ phase: "thinking", verbPhrase: line.slice(0, 200) }).catch(() => undefined);
   }
 
+  /** Words said before a tool call were on the way: the bubble's now, and the reply is what comes after. */
+  private onTheWay(turn: Turn): void {
+    const words = turn.reply.trim();
+    if (words === "") return;
+    turn.said.push(words);
+    turn.reply = "";
+    const line = lastLine(words);
+    if (line === "") return;
+    turn.saidAt = Date.now();
+    void turn.run.status({ phase: "writing", verbPhrase: line.slice(0, 200) }).catch(() => undefined);
+  }
+
   private gauge(turn: Turn, update: SessionUpdate): void {
     const used = update["used"];
     const size = update["size"];
@@ -506,7 +546,7 @@ export class Bridge {
     const now = Date.now();
     if (now - turn.gaugeAt < QUIET_MS) return;
     turn.gaugeAt = now;
-    void turn.run.context({ usedTokens: used, limitTokens: size, model: "agent" }).catch(() => undefined);
+    void turn.run.context({ usedTokens: used, limitTokens: size, model: turn.agentName }).catch(() => undefined);
   }
 
   private async stepped(turn: Turn, update: SessionUpdate): Promise<void> {

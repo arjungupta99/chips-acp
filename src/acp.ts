@@ -165,6 +165,11 @@ export class AcpClient {
     return { configOptions: configOptionsOf(answer ?? {}) };
   }
 
+  /** The session's mode, one of those it offers: Claude Code's `default`, Codex's `workspace-write`. */
+  async setMode(sessionId: string, modeId: string): Promise<void> {
+    await this.call("session/set_mode", { sessionId, modeId });
+  }
+
   /** One turn: resolves with why it stopped, once the agent has finished it. */
   async prompt(sessionId: string, prompt: readonly unknown[]): Promise<string> {
     const answer = (await this.call("session/prompt", { sessionId, prompt })) as Record<

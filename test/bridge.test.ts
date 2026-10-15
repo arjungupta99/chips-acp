@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 async function rig(
-  options: { agent?: FakeAgent; state?: BridgeState; chips?: FakeChips } = {},
+  options: { agent?: FakeAgent; state?: BridgeState; chips?: FakeChips; mode?: string } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents", "restarts"] }));
   if (options.chips === undefined) open.push(() => chips.close());
@@ -37,7 +37,14 @@ async function rig(
   const state = options.state ?? { sessions: {} };
   const bridge = new Bridge({
     chips: client,
-    agents: [{ name: "Fakey", command: ["fake"], cwd: mkdtempSync(join(tmpdir(), "chips-acp-")) }],
+    agents: [
+      {
+        name: "Fakey",
+        command: ["fake"],
+        cwd: mkdtempSync(join(tmpdir(), "chips-acp-")),
+        ...(options.mode === undefined ? {} : { mode: options.mode }),
+      },
+    ],
     home: chips.address.spaceId,
     state,
     saveState: () => undefined,
@@ -76,6 +83,25 @@ function sent(
 }
 
 describe("a turn", () => {
+  it("answers with its last words: what it said before a tool call is the bubble's", async () => {
+    const { chips } = await rig();
+    await chips.say("narrate");
+    const started = await sent(chips, "run.started");
+    const status = await sent(chips, "run.status", (event) => event.payload["phase"] === "writing");
+    assert.equal(status.payload["verb_phrase"], "I'll read the notes first.");
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    assert.equal(words.payload["text"], "Here is the answer.");
+  });
+
+  it("puts each session in the mode the config names, and names the agent on the gauge", async () => {
+    const { chips, agent } = await rig({ mode: "default" });
+    await chips.say("hello");
+    const gauge = await sent(chips, "context.usage");
+    assert.equal(gauge.payload["model"], "Fakey");
+    await sent(chips, "run.completed");
+    assert.deepEqual(agent.modes, [`${agent.made[0]}:default`]);
+  });
+
   it("is a run: a status, a step, the words in the room, its cost, and the end", async () => {
     const { chips, agentId } = await rig();
     await chips.say("summarise the notes");

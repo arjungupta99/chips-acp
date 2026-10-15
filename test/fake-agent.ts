@@ -10,6 +10,7 @@
  * - `nothing`: it says `NO_REPLY`;
  * - `refuse`: it stops with `refusal`;
  * - `die`: its process goes away mid-turn.
+ * - `narrate`: it says what it will do, reads a file, and then answers.
  *
  * With `askFirst`, anything else asks permission to write the tracker first, as a real agent asks
  * before it changes something.
@@ -25,6 +26,8 @@ export interface FakeAgent {
   readonly made: string[];
   readonly loaded: string[];
   readonly cancels: string[];
+  /** `<session>:<mode>` for each mode it was put in. */
+  readonly modes: string[];
   /** How many times it was started. */
   starts: number;
 }
@@ -35,6 +38,7 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
     made: [],
     loaded: [],
     cancels: [],
+    modes: [],
     starts: 0,
     wire: () => {
       agent.starts += 1;
@@ -79,6 +83,15 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
         }
         if (last === "refuse") {
           reply("refusal");
+          return;
+        }
+        if (last === "narrate") {
+          say("I'll read the notes first.");
+          update(sessionId, { sessionUpdate: "tool_call", toolCallId: "t3", title: "Read notes.md", kind: "read", status: "in_progress" });
+          update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "t3", status: "completed" });
+          say("Here is the answer.");
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          reply("end_turn");
           return;
         }
         if (last === "nothing") {
@@ -186,6 +199,10 @@ export function fakeAgent(options: { loadSession?: boolean; askFirst?: boolean }
             void prompt(id, String(params["sessionId"]), blocks.map((block) => block.text ?? "").join("\n"));
             return;
           }
+          case "session/set_mode":
+            agent.modes.push(`${String(params["sessionId"])}:${String(params["modeId"])}`);
+            send({ id, result: {} });
+            return;
           case "session/cancel":
             agent.cancels.push(String(params["sessionId"]));
             cancelled.add(String(params["sessionId"]));

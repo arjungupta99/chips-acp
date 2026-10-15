@@ -35,6 +35,7 @@ function readConfig(path: string): Config {
       name: agent["name"],
       command: (agent["command"] as unknown[]).map(String),
       cwd: resolve(home(typeof agent["cwd"] === "string" ? agent["cwd"] : "~/chips-acp/work")),
+      ...(typeof agent["mode"] === "string" ? { mode: agent["mode"] } : {}),
       ...(typeof agent["env"] === "object" && agent["env"] !== null
         ? { env: agent["env"] as Record<string, string> }
         : {}),
