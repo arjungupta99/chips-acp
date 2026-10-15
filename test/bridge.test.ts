@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chips/conformance";
 import { type Chips, connect } from "@chips/harness";
-import { Bridge, type BridgeState, keyOf } from "../src/bridge.ts";
+import { Bridge, type BridgeState, goalOf, keyOf } from "../src/bridge.ts";
 import { type FakeAgent, fakeAgent } from "./fake-agent.ts";
 
 interface Rig {
@@ -83,6 +83,13 @@ function sent(
 }
 
 describe("a turn", () => {
+  it("names its run by the words after the agent's whole @name", () => {
+    const message = (text: string) => ({ text, from: { display_name: "Arjun" } }) as Parameters<typeof goalOf>[0];
+    assert.equal(goalOf(message("@Claude Code Delete second.txt"), "Claude Code"), "Delete second.txt");
+    assert.equal(goalOf(message("@Codex Run curl"), "Codex"), "Run curl");
+    assert.equal(goalOf(message("@Claude Code"), "Claude Code"), "Answer Arjun");
+  });
+
   it("answers with its last words: what it said before a tool call is the bubble's", async () => {
     const { chips } = await rig();
     await chips.say("narrate");

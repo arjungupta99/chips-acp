@@ -35,8 +35,34 @@ The config:
 
 `command` is how the agent speaks ACP over stdio: `["goose", "acp"]`, `["gemini", "--acp"]`,
 `["opencode", "acp"]`, `["npx", "@agentclientprotocol/claude-agent-acp"]`, `["codex-acp"]`. `cwd` is
-the folder its sessions work in. `env` adds to its environment. Installing an agent and signing it
+the folder its sessions work in. `mode` is the mode its sessions are put in, of those the agent
+offers (see below). `env` adds to its environment. Installing an agent and signing it
 in to a model is done the agent's own way, before it is named here.
+
+### Asking a person
+
+Claude Code's and Codex's adapters start each session in a mode where the agent decides for
+itself: Claude Code's `auto`, Codex's `agent` ("Auto review", where Codex's own reviewer answers
+its asks). Then nothing reaches Chips as a card. Put them where they ask:
+
+```json
+{ "name": "Claude Code", "command": ["claude-agent-acp"], "cwd": "~/chips-acp/claude", "mode": "default" },
+{ "name": "Codex", "command": ["codex-acp"], "cwd": "~/chips-acp/codex", "mode": "workspace-write" }
+```
+
+- Claude Code still follows its own settings (`~/.claude/settings.json`). What they allow, it
+  does without asking, and read-only commands never ask.
+- Codex in `workspace-write` changes its folder freely and asks before the network or anything
+  outside it. `read-only` asks before any change.
+
+## Live
+
+14 October 2026, on Chips's live server: Claude Code (`@agentclientprotocol/claude-agent-acp`
+0.90.0, on its own sign-in) and Codex (`@agentclientprotocol/codex-acp` 2.2.2, on a ChatGPT
+sign-in). Each took turns with steps, the gauge and the reply. Claude Code's cost came with its
+turns; Codex's didn't, as on a ChatGPT sign-in its adapter reports none. An approval went round
+from each, asked, approved in Chips, the call run, and said so. Chips's
+`testing/scenarios/harnesses/acp-agents-live.md` has the run.
 
 ## What maps to what
 
