@@ -15,32 +15,25 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { connect, fileStore, join as joinChips } from "@chips/harness";
+import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
+import { checkCommand, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
-
-function readConfig(path: string): KindConfig {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  const name = raw["name"];
-  const command = raw["command"];
-  if (typeof name !== "string" || name.trim() === "" || !Array.isArray(command) || command.length === 0) {
-    throw new Error(`${path} names a kind of agent and how to run it: { "name", "command", "folders" }`);
-  }
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return {
-    name,
-    command: command.map(String),
-    folders: resolve(home(typeof raw["folders"] === "string" ? raw["folders"] : `~/chips-acp/${slug}`)),
-    ...(typeof raw["folder"] === "string" ? { folder: resolve(home(raw["folder"])) } : {}),
-    ...(typeof raw["mode"] === "string" ? { mode: raw["mode"] } : {}),
-    ...(typeof raw["env"] === "object" && raw["env"] !== null ? { env: raw["env"] as Record<string, string> } : {}),
-  };
-}
+const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
 const configPath = resolve(home(process.argv[2] ?? "~/.chips-acp/config.json"));
-const kind = readConfig(configPath);
+// What it needs, checked before a link is taken up, which works once.
+let kind: KindConfig;
+try {
+  kind = readConfig(configPath);
+  if (link !== undefined) checkCommand(kind);
+} catch (error) {
+  if (!(error instanceof SetupError)) throw error;
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+}
 const folder = join(dirname(configPath), basename(configPath, ".json"));
 const statePath = join(folder, "state.json");
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
@@ -49,7 +42,7 @@ mkdirSync(folder, { recursive: true, mode: 0o700 });
 mkdirSync(kind.folder ?? kind.folders, { recursive: true });
 
 const joined = await joinChips({
-  link: process.env["CHIPS_JOIN_LINK"],
+  link,
   url: process.env["CHIPS_URL"],
   name: kind.name,
   software: "chips-acp 0.2.0",
@@ -85,6 +78,14 @@ bridge = new Bridge({
 });
 await bridge.start();
 log(`connected as ${chips.harnessId} (${kind.name}), ${Object.keys(state.agents).length} agent(s)`);
+
+// Its first words in the room it joined, once: the card that followed its link waits for them. A
+// kind has no agent of its own until Chips makes one, so the harness says them.
+await helloOnce(joined, {
+  name: kind.name,
+  say: (spaceId) =>
+    chips.post({ spaceId, text: `Hi, ${kind.name} here, through chips-acp. Make me an agent from any room, or ask me here.` }),
+}).catch((error: unknown) => log(`hello not said: ${String(error)}`));
 
 const stop = () => {
   bridge?.stop();

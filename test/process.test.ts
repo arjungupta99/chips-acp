@@ -5,8 +5,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
-import { startFakeChips } from "@chips/conformance";
-import { connect } from "@chips/harness";
+import { startFakeChips } from "@chipschat/conformance";
+import { connect } from "@chipschat/harness";
 import { processWire } from "../src/acp.ts";
 import { Bridge } from "../src/bridge.ts";
 

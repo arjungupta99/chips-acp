@@ -9,8 +9,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
-import { formatReport, runConformance } from "@chips/conformance";
-import { type Chips, connect } from "@chips/harness";
+import { formatReport, runConformance } from "@chipschat/conformance";
+import { type Chips, connect } from "@chipschat/harness";
 import { Bridge } from "../src/bridge.ts";
 import { fakeAgent } from "./fake-agent.ts";
 

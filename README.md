@@ -4,11 +4,11 @@ An agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com
 Code, Codex, Goose, Gemini — as a Chips harness, one kind per harness. People make its agents from
 Chips: a room from the +, a new agent from a room's Add page, a copy with Fork. Each agent works in a
 folder of its own; each room it is in is one ACP session of it. There is no Main agent. The bridge
-runs the agent's process, so the bridge is the harness (Chips ADR 0041), built on `@chips/harness`.
+runs the agent's process, so the bridge is the harness (Chips ADR 0041), built on `@chipschat/harness`.
 Phase 4 of Chips's `docs/proposals/open-source-harnesses-plan.md`, and Chips's
 `docs/proposals/acp-agents-made-from-chips-plan.md`.
 
-Local only: no remote, nothing published. The `@chips/*` packages come from `vendor/`, packed from
+Local only: no remote, nothing published. The `@chipschat/*` packages come from `vendor/`, packed from
 the Chips repo with `pnpm release:sdk`.
 
 ## Run it
@@ -19,8 +19,13 @@ cp config.example.json ~/.chips-acp/claude-code.json   # one config per kind
 CHIPS_JOIN_LINK='<a join link made in Chips>' npm start ~/.chips-acp/claude-code.json
 ```
 
-A join link for it asks for `agents`, `new_spaces`, `new_agents`, `forks` and `restarts`. Without
-a link, set `CHIPS_URL` and allow the code it prints from Chips. Its key is kept as `join()` keeps
+The link comes from Chips's gallery (Add an agent → Claude Code, Codex and more), whose card gives
+this line with the link in it and starts the link with what it needs on: `agents`, `new_spaces`,
+`new_agents`, `forks` and `restarts`. Before it takes the link up, which works once, it checks the
+config is there and its command is on this machine's PATH; anything missing stops it with what to
+do, and the link is still good. Joined, it says hello in its room once, which the card waits for;
+a new link from Chips replaces the key it kept. Without a link, set `CHIPS_URL` and allow the code
+it prints from Chips. Its key is kept as `join()` keeps
 one (the keychain, under the kind's name); its cursor, unanswered events, unended runs, its agents
 and which session each of their rooms is are kept in a folder beside the config, named after it
 (`~/.chips-acp/claude-code/`), so a restart picks up where it was.

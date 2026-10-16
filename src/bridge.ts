@@ -22,9 +22,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Agent, Chips, Decision, Run, Speaker, SpaceAsked } from "@chips/harness";
-import { promptFor } from "@chips/harness";
-import type { AgentAsked, AgentFork, AnyEvent, MessageNew, RiskClass, StepKind } from "@chips/protocol";
+import type { Agent, Chips, Decision, Run, Speaker, SpaceAsked } from "@chipschat/harness";
+import { promptFor } from "@chipschat/harness";
+import type { AgentAsked, AgentFork, AnyEvent, MessageNew, RiskClass, StepKind } from "@chipschat/protocol";
 import {
   AcpClient,
   AcpError,

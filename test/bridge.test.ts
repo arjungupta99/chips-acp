@@ -8,8 +8,8 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { type FakeChips, type StoredEvent, startFakeChips } from "@chips/conformance";
-import { type Chips, connect } from "@chips/harness";
+import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
+import { type Chips, connect } from "@chipschat/harness";
 import { Bridge, type BridgeState, forkName, goalOf, type KindConfig, titleFrom } from "../src/bridge.ts";
 import { type FakeAgent, fakeAgent } from "./fake-agent.ts";
 
