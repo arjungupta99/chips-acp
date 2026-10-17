@@ -71,19 +71,17 @@ named here. A second kind is a second config, and a second bridge beside the fir
 - A session quiet for 30 minutes is closed (`session/close`) and loaded again on the next word,
   where the agent offers both: each open Claude Code session is a process of its own.
 
-### As a launch agent
+### Keep it running
 
-Once it has joined (its key is in the keychain, under the server's address), launchd can keep it
-running from login, and start it again if it stops: one launch agent per kind.
-`~/Library/LaunchAgents/chat.chips.acp.claude-code.plist` runs
-`/opt/homebrew/bin/node --import tsx src/main.ts ~/.chips-acp/claude-code.json` in this folder
-with `CHIPS_URL` set to the address it joined (so the kept key is found, and no link is needed),
-`RunAtLoad` and `KeepAlive`, and logs to `~/Library/Logs/chips-acp-claude-code.log`.
+`npm run keep <config>` does what `npm start <config>` does, with the link or without, then writes
+a launch agent, `~/Library/LaunchAgents/chat.chips.acp.<config's name>.plist` (a systemd user unit
+on Linux), that runs the bridge from login and again whenever it stops, and ends. Its log is
+`~/Library/Logs/chips-acp-<config's name>.log`; `npm run keep -- <config> --stop` stops it and
+removes the file. A launch agent of that name written by hand is left as it is, so a harness never
+runs twice:
 
 ```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/chat.chips.acp.claude-code.plist   # load and start
-launchctl kickstart -k gui/$(id -u)/chat.chips.acp.claude-code                            # restart
-launchctl bootout gui/$(id -u)/chat.chips.acp.claude-code                                 # stop and unload
+launchctl kickstart -k gui/$(id -u)/chat.chips.acp.claude-code   # restart one
 ```
 
 Stop any copy started by hand first: two bridges for one harness answer twice.

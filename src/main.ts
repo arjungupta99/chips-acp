@@ -10,6 +10,9 @@
  * `~/.chips-acp/config.json` unless a path is given. What it keeps is in a folder beside it, named
  * after it (`~/.chips-acp/claude-code/` for `claude-code.json`): the SDK's state (cursor,
  * unanswered events, runs not ended), and its agents and which session each of their rooms is.
+ *
+ * `npm run keep [config]` is the same, then keeps the bridge running from login (`keep.ts`), as
+ * the launch agent `chat.chips.acp.<config's name>`.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,12 +21,15 @@ import { basename, dirname, join, resolve } from "node:path";
 import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
+import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { checkCommand, checkSignIn, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
-const configPath = resolve(home(process.argv[2] ?? "~/.chips-acp/config.json"));
+const configPath = resolve(home(words[0] ?? "~/.chips-acp/config.json"));
+const LABEL = `chat.chips.acp.${basename(configPath, ".json")}`;
+stopIfAsked(LABEL);
 // What it needs, checked before a link is taken up, which works once.
 let kind: KindConfig;
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
@@ -56,6 +62,9 @@ const joined = await joinChips({
   wants: ["agents", "new_spaces", "new_agents", "forks", "restarts"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 });
+// Joined, `npm run keep` hands over to a copy kept running, which says the hello. What signs its
+// agent in, where it is set, goes with it.
+keepIfAsked(LABEL, joined.url, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], log);
 
 const kept = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as Partial<BridgeState>) : {};
 const state: BridgeState = { sessions: kept.sessions ?? {}, agents: kept.agents ?? {} };
