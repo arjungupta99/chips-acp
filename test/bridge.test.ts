@@ -144,6 +144,21 @@ describe("a turn", () => {
     assert.deepEqual(agent.modes, [`${agent.made[0]}:default`]);
   });
 
+  // Codex hosted its game on a site, or linked a path nobody in the room could open (Chips TT-7, TT-9).
+  it("sends each file a MEDIA: line names from the agent's folder, and says what it couldn't send", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("send");
+    const started = await sent(chips, "run.started");
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    assert.equal(words.payload["text"], "The page is ready.\n\n(hosts was not attached: it is outside the agent's folder.)");
+    const attachments = words.payload["attachments"] as { filename: string }[];
+    assert.deepEqual(
+      attachments.map((each) => each.filename),
+      ["page.html"],
+    );
+    assert.match(agent.prompts[0] ?? "", /MEDIA:<path> on a line of its own/, "it was told how");
+  });
+
   it("is a run: a status, a step, the words in the room, its cost, and the end", async () => {
     const { chips, agentId } = await rig();
     await chips.say("summarise the notes");

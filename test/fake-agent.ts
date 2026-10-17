@@ -17,6 +17,8 @@
  * closes them (`session/close`) when `close` is true.
  */
 
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Wire } from "../src/acp.ts";
 
 type Message = Record<string, unknown>;
@@ -102,6 +104,13 @@ export function fakeAgent(
           update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "t3", status: "completed" });
           say("Here is the answer.");
           await new Promise((resolve) => setTimeout(resolve, 20));
+          reply("end_turn");
+          return;
+        }
+        if (last === "send") {
+          // A page written in its folder and named as the Chips SDK says, and a file outside it.
+          writeFileSync(join(agent.cwds.get(sessionId) ?? ".", "page.html"), "<p>play</p>");
+          say("The page is ready.\n\nMEDIA:page.html\nMEDIA:/etc/hosts");
           reply("end_turn");
           return;
         }

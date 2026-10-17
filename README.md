@@ -126,6 +126,7 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 | Plan | `plan` |
 | Context gauge, cost | `usage_update` (`used`/`size`; `cost` in USD, the turn's share) |
 | The reply | `agent_message_chunk`s gathered into one message; `NO_REPLY` alone is the turn passed |
+| Files in the reply | each `MEDIA:<path>` line of the reply sent as an upload with its words, only from the agent's folder (`sendAnswer`); the post says why one could not go |
 | Approval card | `session/request_permission`; allowed always picks `allow_always`, no picks `reject_once`; Stop answers `cancelled`; the card hears how the call went |
 | Question card | `elicitation/create` form of up to four choice or yes/no fields; anything else is declined |
 | Stop | `session/cancel` |
@@ -139,8 +140,7 @@ permissions, and each permission it asks for is an approval card.
 ## Not built yet
 
 From the plan's Phase 4: agents over WebSocket (`goose serve`); `follows_rooms`; models and effort
-from `configOptions`; context files; the bridge's own MCP server (reminders, ask a person, post a
-file) and heartbeats; sub-agents as lanes; free-text form fields; approval scopes limited to the
+from `configOptions`; context files; the bridge's own MCP server (reminders, ask a person) and heartbeats; sub-agents as lanes; free-text form fields; approval scopes limited to the
 agent's options (a wire change, Phase 6).
 
 ## Tests

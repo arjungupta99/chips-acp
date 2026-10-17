@@ -23,7 +23,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Run, Speaker, SpaceAsked } from "@chipschat/harness";
-import { promptFor } from "@chipschat/harness";
+import { promptFor, sendAnswer } from "@chipschat/harness";
 import type { AgentAsked, AgentFork, AnyEvent, MessageNew, RiskClass, StepKind } from "@chipschat/protocol";
 import {
   AcpClient,
@@ -688,7 +688,7 @@ export class Bridge {
     const { sessionId } = turn;
     turn.costAtStart = this.costs.get(sessionId);
 
-    let words = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
+    let words = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles: true });
     const files = await this.filesFor(record, message);
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
     if (turn.cancelled) return;
@@ -776,10 +776,17 @@ export class Bridge {
       return;
     }
     // Its last words; when it ended on a tool call, the words before it.
-    const reply = turn.reply.trim() || (turn.said.at(-1) ?? "");
-    if (reply !== "") await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply });
+    const answer = turn.reply.trim() || (turn.said.at(-1) ?? "");
+    // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
+    const { chips } = this.options;
+    const post = await sendAnswer(answer, { folders: [room.record.folder], upload: (input) => chips.upload(input) });
+    const reply = post.text;
+    if (reply !== "" || post.uploadIds.length > 0) {
+      await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds });
+    }
     const cut = stop === "max_tokens" || stop === "max_turn_requests";
-    const summary = reply === "" ? "Done." : reply.length <= 2000 ? reply : `${reply.slice(0, 1990)}…`;
+    const said = post.summary;
+    const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
     await run.complete({
       summary,
       ...(cut ? { followUps: [`${room.record.name} stopped at its limit (${stop}).`] } : {}),
