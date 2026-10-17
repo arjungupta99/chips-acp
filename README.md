@@ -154,3 +154,14 @@ conformance kit's fake Chips, which checks every event against the protocol's sc
 golden scenario with the +, Add and Fork, which
 `chips conformance custom --capabilities agents,new_spaces,new_agents,forks,restarts` runs live:
 Lives in Chips 5 of 6.
+
+```bash
+npm run e2e
+```
+
+The gallery's ACP card, run as a person runs it, against a scratch Chips from a Chips checkout
+(`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one), with the fake agent installed on the
+PATH under a name of its own (never `claude-agent-acp`, which this machine may have for real). Each
+thing not set up stops it with the link still good; then it joins with what the card grants, says
+hello once in its room, says nothing more started again, and takes up a new link in place of the key
+it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`.
