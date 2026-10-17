@@ -30,10 +30,13 @@ import {
   AcpError,
   type AgentInfo,
   type AgentRequest,
+  type AuthStatus,
+  isAuthRequired,
   notOffered,
   type SessionUpdate,
   type Wire,
 } from "./acp.js";
+import { signedOutWords } from "./kinds.js";
 
 /** The kind of agent this harness is, and how to run it. */
 export interface KindConfig {
@@ -106,6 +109,8 @@ const IDLE_MS = 30 * 60_000;
 interface Process {
   client?: AcpClient | undefined;
   info?: AgentInfo | undefined;
+  /** Who it last said it is signed in as, so the log says each change once. */
+  auth?: string | undefined;
   /** Sessions open in this process, so a stored one is loaded once. */
   readonly live: Set<string>;
   stopping: boolean;
@@ -513,6 +518,7 @@ export class Bridge {
       update: (sessionId, update) => this.updated(sessionId, update),
       request: (request) => this.asked(request),
       exit: (why) => void this.stopped(client, why),
+      auth: (status) => this.signedIn(status),
     });
     proc.client = client;
     try {
@@ -523,6 +529,25 @@ export class Bridge {
       this.log(`${name} didn't say hello: ${String(error)}`);
       client.close();
     }
+  }
+
+  /** Its sign-in in the log, once a change: a signed-out agent fails every turn until it's put right. */
+  private signedIn(status: AuthStatus): void {
+    const said = status.kind === "none" ? "none" : `${status.kind} ${status.label ?? ""}`;
+    if (this.process.auth === said) return;
+    this.process.auth = said;
+    const { kind } = this.options;
+    this.log(
+      status.kind === "none"
+        ? `${signedOutWords(kind, this.process.info)} Its turns fail until then.`
+        : `${kind.name} is signed in${status.label === undefined ? "" : `: ${status.label}`}`,
+    );
+  }
+
+  /** What a turn's failure says: how to sign in when that's why, else the agent's own words. */
+  private failure(record: AgentRecord, error: unknown, what = ""): string {
+    if (isAuthRequired(error)) return `${signedOutWords(this.options.kind, this.process.info)} Then send this again.`;
+    return `${record.name}${what}: ${messageOf(error)}`;
   }
 
   private async stopped(client: AcpClient, why: string): Promise<void> {
@@ -682,7 +707,7 @@ export class Bridge {
     try {
       turn.sessionId = await this.sessionFor(record, client, spaceId);
     } catch (error) {
-      if (!run.over) await run.fail({ error: `${record.name} couldn't open a session: ${messageOf(error)}` });
+      if (!run.over) await run.fail({ error: this.failure(record, error, " couldn't open a session"), retryable: isAuthRequired(error) });
       return;
     }
     const { sessionId } = turn;
@@ -697,7 +722,7 @@ export class Bridge {
       try {
         stop = await client.prompt(sessionId, [{ type: "text", text: prompt }]);
       } catch (error) {
-        if (!run.over) await run.fail({ error: `${record.name}: ${messageOf(error)}`, retryable: true });
+        if (!run.over) await run.fail({ error: this.failure(record, error), retryable: true });
         return;
       }
       if (turn.cancelled) return;

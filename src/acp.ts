@@ -43,7 +43,20 @@ export interface AgentInfo {
   readonly forkSession: boolean;
   readonly images: boolean;
   readonly authMethods: readonly { readonly id: string; readonly name: string }[];
+  /** Whether it says who it is signed in as (`_auth/status_update`), as Claude Code's and Codex's do. */
+  readonly reportsAuth: boolean;
   readonly name?: string | undefined;
+}
+
+/** Who the agent says it is signed in as: `none` is signed out. */
+export interface AuthStatus {
+  readonly kind: string;
+  readonly label?: string | undefined;
+}
+
+/** The refusal ACP gives a session or a turn while the agent isn't signed in (`authRequired`). */
+export function isAuthRequired(error: unknown): boolean {
+  return error instanceof AcpError && error.code === -32000 && /auth/i.test(error.message);
 }
 
 /** One of `session/update`'s kinds, as the agent sent it. */
@@ -63,6 +76,8 @@ export interface AcpHandlers {
   readonly request: (request: AgentRequest) => Promise<unknown>;
   /** The process went away, with how it ended. */
   readonly exit: (why: string) => void;
+  /** Who it is signed in as, when it says (after `initialize`, and when that changes). */
+  readonly auth?: (status: AuthStatus) => void;
 }
 
 /** A line-delimited JSON-RPC peer over two streams: the process's, or a test's. */
@@ -137,6 +152,7 @@ export class AcpClient {
     const prompts = (capabilities["promptCapabilities"] ?? {}) as Record<string, unknown>;
     const info = (answer["agentInfo"] ?? {}) as Record<string, unknown>;
     const sessions = (capabilities["sessionCapabilities"] ?? {}) as Record<string, unknown>;
+    const meta = (capabilities["_meta"] ?? {}) as Record<string, unknown>;
     return {
       protocolVersion: Number(answer["protocolVersion"] ?? ACP_VERSION),
       loadSession: capabilities["loadSession"] === true,
@@ -146,6 +162,7 @@ export class AcpClient {
       authMethods: Array.isArray(answer["authMethods"])
         ? (answer["authMethods"] as { id: string; name: string }[])
         : [],
+      reportsAuth: meta["authStatus"] !== undefined && meta["authStatus"] !== null,
       ...(typeof info["name"] === "string" ? { name: info["name"] } : {}),
     };
   }
@@ -269,6 +286,15 @@ export class AcpClient {
   }
 
   private notified(method: string, params: Readonly<Record<string, unknown>>): void {
+    if (method === "_auth/status_update") {
+      const status = params["authStatus"] as Record<string, unknown> | undefined;
+      if (typeof status?.["kind"] !== "string") return;
+      this.handlers.auth?.({
+        kind: status["kind"],
+        ...(typeof status["label"] === "string" ? { label: status["label"] } : {}),
+      });
+      return;
+    }
     if (method !== "session/update") return;
     const update = params["update"] as SessionUpdate | undefined;
     if (update === undefined || typeof update.sessionUpdate !== "string") return;

@@ -209,6 +209,17 @@ describe("a turn", () => {
     const failed = await sent(chips, "run.failed");
     assert.match(String(failed.payload["error"]), /refused/);
   });
+
+  it("says how to sign in when the agent refuses the turn, or the session, because it isn't", async () => {
+    const words = /^Fakey isn't signed in on this machine: sign it in its own way \(Fake sign-in\)\. Then send this again\.$/;
+    for (const agent of [fakeAgent({ auth: "out" }), fakeAgent({ auth: "out", refusesSessions: true })]) {
+      const { chips } = await rig({ agent });
+      await chips.say("hello");
+      const failed = await sent(chips, "run.failed");
+      assert.match(String(failed.payload["error"]), words);
+      assert.equal(failed.payload["retryable"], true);
+    }
+  });
 });
 
 describe("no Main agent", () => {

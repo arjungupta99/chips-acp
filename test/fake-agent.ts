@@ -12,6 +12,10 @@
  * - `die`: its process goes away mid-turn.
  * - `narrate`: it says what it will do, reads a file, and then answers.
  *
+ * With `auth`, it says who it is signed in as after `initialize`: `out` is nobody, and it refuses
+ * every turn, as Claude Code does signed out; with `refusesSessions` it refuses each session too, as
+ * Codex does.
+ *
  * With `askFirst`, anything else said in the first session it made asks permission to write the
  * tracker first, as a real agent asks before it changes something. It copies sessions (`session/fork`) unless `fork` is false, and
  * closes them (`session/close`) when `close` is true.
@@ -41,7 +45,14 @@ export interface FakeAgent {
 }
 
 export function fakeAgent(
-  options: { loadSession?: boolean; askFirst?: boolean; fork?: boolean; close?: boolean } = {},
+  options: {
+    loadSession?: boolean;
+    askFirst?: boolean;
+    fork?: boolean;
+    close?: boolean;
+    auth?: "in" | "out";
+    refusesSessions?: boolean;
+  } = {},
 ): FakeAgent {
   const agent: FakeAgent = {
     prompts: [],
@@ -78,8 +89,13 @@ export function fakeAgent(
         for (const closer of closers) closer(why);
       };
 
+      const signedOut = { code: -32000, message: "Authentication required" };
       const prompt = async (id: unknown, sessionId: string, text: string) => {
         agent.prompts.push(text);
+        if (options.auth === "out" || options.refusesSessions === true) {
+          send({ id, error: signedOut });
+          return;
+        }
         const last = text.split("\n").at(-1)?.split(": ").at(-1)?.trim() ?? "";
         const reply = (stopReason: string) => send({ id, result: { stopReason } });
         const say = (words: string) =>
@@ -200,6 +216,7 @@ export function fakeAgent(
               result: {
                 protocolVersion: 1,
                 agentCapabilities: {
+                  ...(options.auth === undefined ? {} : { _meta: { authStatus: {} } }),
                   loadSession: options.loadSession === true,
                   sessionCapabilities: {
                     ...(options.fork === false ? {} : { fork: {} }),
@@ -207,10 +224,19 @@ export function fakeAgent(
                   },
                 },
                 agentInfo: { name: "fake-agent" },
+                authMethods: [{ id: "fake-login", name: "Fake sign-in" }],
               },
             });
+            if (options.auth !== undefined) {
+              const authStatus = options.auth === "in" ? { kind: "account", label: "Test account" } : { kind: "none", label: "Not logged in" };
+              setTimeout(() => send({ method: "_auth/status_update", params: { authStatus } }), 30);
+            }
             return;
           case "session/new": {
+            if (options.refusesSessions === true) {
+              send({ id, error: signedOut });
+              return;
+            }
             const sessionId = `sess-${agent.made.length + agent.loaded.length + 1}-${agent.starts}`;
             agent.made.push(sessionId);
             agent.cwds.set(sessionId, String(params["cwd"]));

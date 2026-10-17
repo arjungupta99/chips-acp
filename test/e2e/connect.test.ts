@@ -4,14 +4,15 @@
  * spent; then it joins with what the card grants and says hello once; started again it says
  * nothing more; and a new link is taken up in place of the key it kept.
  *
- * The config names a command of the test's own, never `claude-agent-acp`: this machine may have
- * the real one on its PATH.
+ * Claude Code's card needs no config, so the first run is on a PATH without `claude-agent-acp`:
+ * this machine may have the real one. Then a config names a command of the test's own, the fake
+ * agent, signed out and then in.
  */
 
 import { strict as assert } from "node:assert";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { STILL_GOOD } from "../../src/setup.ts";
 import { type CardLink, here, type ScratchChips, scratchChips, skip } from "./kit.ts";
@@ -44,7 +45,7 @@ describe("ACP's card, from a link to its hello", { skip, timeout: 180_000 }, () 
   before(async () => {
     chips = await scratchChips();
     home = mkdtempSync(join(tmpdir(), "chips-acp-home-"));
-    card = await chips.card("acp");
+    card = await chips.card("claude-code");
     // The agent's ACP adapter, installed its own way: here, the fake agent under a name of its own.
     const bin = join(home, "bin");
     mkdirSync(bin);
@@ -62,13 +63,24 @@ describe("ACP's card, from a link to its hello", { skip, timeout: 180_000 }, () 
   });
 
   it("stops on each thing not set up, and leaves the link good", async () => {
-    await stopped(card.command, /There is no config at .*\.chips-acp\/claude-code\.json/);
-    mkdirSync(join(home, ".chips-acp"));
-    writeFileSync(
-      join(home, ".chips-acp", "claude-code.json"),
-      JSON.stringify({ name: "Claude Code", command: [AGENT], folders: "~/chips-acp/claude-code" }),
+    // No config: Claude Code's own, whose adapter isn't installed on a PATH of node and the system's.
+    const bare = [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter);
+    await stopped(
+      card.command,
+      /Claude Code's command, claude-agent-acp, isn't on this machine's PATH: install it with `npm install -g @agentclientprotocol\/claude-agent-acp`/,
+      bare,
     );
+    mkdirSync(join(home, ".chips-acp"));
+    const config = (env: Record<string, string>) =>
+      writeFileSync(
+        join(home, ".chips-acp", "claude-code.json"),
+        JSON.stringify({ name: "Claude Code", command: [AGENT], folders: "~/chips-acp/claude-code", env }),
+      );
+    config({});
     await stopped(card.command, new RegExp(`Claude Code's command, ${AGENT}, isn't on this machine's PATH`));
+    config({ FAKE_AGENT_AUTH: "out" });
+    await stopped(card.command, /Claude Code isn't signed in on this machine: sign it in its own way \(Fake sign-in\)\./, installed);
+    config({ FAKE_AGENT_AUTH: "in" });
   });
 
   it("joins with what the card grants, and says hello once in its room", async () => {
@@ -109,7 +121,7 @@ describe("ACP's card, from a link to its hello", { skip, timeout: 180_000 }, () 
 
   it("takes up a new link in place of the key it kept, and says hello in the new room", async () => {
     const first = await chips.request(card.requestId);
-    const again = await chips.card("acp");
+    const again = await chips.card("claude-code");
     const running = run(again.command);
     try {
       const request = await chips.until("the new link taken up", async () => {

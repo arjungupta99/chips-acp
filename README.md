@@ -14,21 +14,31 @@ the Chips repo with `pnpm release:sdk`.
 ## Run it
 
 ```bash
+npm install -g @agentclientprotocol/claude-agent-acp   # or @agentclientprotocol/codex-acp
 npm install
-cp config.example.json ~/.chips-acp/claude-code.json   # one config per kind
 CHIPS_JOIN_LINK='<a join link made in Chips>' npm start ~/.chips-acp/claude-code.json
 ```
 
-The link comes from Chips's gallery (Add an agent → Claude Code, Codex and more), whose card gives
-this line with the link in it and starts the link with what it needs on: `agents`, `new_spaces`,
-`new_agents`, `forks` and `restarts`. Before it takes the link up, which works once, it checks the
-config is there and its command is on this machine's PATH; anything missing stops it with what to
-do, and the link is still good. Joined, it says hello in its room once, which the card waits for;
-a new link from Chips replaces the key it kept. Without a link, set `CHIPS_URL` and allow the code
-it prints from Chips. Its key is kept as `join()` keeps
+The link comes from Chips's gallery (Add an agent → Claude Code, or Codex), whose card gives this
+line with the link in it (`codex.json` for Codex) and starts the link with what it needs on:
+`agents`, `new_spaces`, `new_agents`, `forks` and `restarts`. `claude-code.json` and `codex.json`
+need not be there: without them the bridge runs Claude Code or Codex, in the mode that asks (see
+"Asking a person"), with each agent's folder under `~/chips-acp/claude-code` or `~/chips-acp/codex`.
+
+Before it takes the link up, which works once, it checks:
+- the config is there, or is one of those two;
+- its command is on this machine's PATH (else how to install it);
+- the agent starts, makes a session, and is signed in: Codex refuses a session while signed out,
+  and Claude Code says it is signed in as nobody (`_auth/status_update`). Signed out, it says how
+  to sign in: `codex login`, or `claude` then /login.
+
+Anything missing stops it with what to do, and the link is still good. Joined, it says hello in its
+room once, which the card waits for; a new link from Chips replaces the key it kept. Without a
+link, set `CHIPS_URL` and allow the code it prints from Chips. Its key is kept as `join()` keeps
 one (the keychain, under the kind's name); its cursor, unanswered events, unended runs, its agents
 and which session each of their rooms is are kept in a folder beside the config, named after it
-(`~/.chips-acp/claude-code/`), so a restart picks up where it was.
+(`~/.chips-acp/claude-code/`), so a restart picks up where it was. Each start logs whether the
+agent says it is signed in, and a turn it refuses for that says how to sign in.
 
 The config names one kind:
 
@@ -46,8 +56,8 @@ The config names one kind:
 - `mode` is the mode its sessions are put in, of those the agent offers (see below). `env` adds to
   its environment.
 
-Installing an agent and signing it in to a model is done the agent's own way, before it is named
-here. A second kind is a second config, and a second bridge beside the first.
+Installing any other agent and signing it in to a model is done the agent's own way, before it is
+named here. A second kind is a second config, and a second bridge beside the first.
 
 ### Its agents
 

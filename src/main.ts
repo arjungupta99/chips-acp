@@ -5,7 +5,7 @@
  * every agent of the kind Chips makes, until it is stopped. A second kind is a second config, run
  * beside it.
  *
- * The config is JSON:
+ * The config is JSON (Claude Code's and Codex's need none: `claude-code.json` and `codex.json` are theirs):
  * `{ "name": "Claude Code", "command": ["claude-agent-acp"], "mode": "default", "folders": "~/chips-acp/claude-code" }`,
  * `~/.chips-acp/config.json` unless a path is given. What it keeps is in a folder beside it, named
  * after it (`~/.chips-acp/claude-code/` for `claude-code.json`): the SDK's state (cursor,
@@ -18,7 +18,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
-import { checkCommand, readConfig, SetupError } from "./setup.js";
+import { checkCommand, checkSignIn, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -26,9 +26,18 @@ const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 const configPath = resolve(home(process.argv[2] ?? "~/.chips-acp/config.json"));
 // What it needs, checked before a link is taken up, which works once.
 let kind: KindConfig;
+const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 try {
   kind = readConfig(configPath);
-  if (link !== undefined) checkCommand(kind);
+  mkdirSync(kind.folder ?? kind.folders, { recursive: true });
+  if (link !== undefined) {
+    checkCommand(kind);
+    log(`checking that ${kind.name} starts and is signed in`);
+    const cwd = kind.folder ?? kind.folders;
+    const stderr: string[] = [];
+    const wire = processWire(kind.command, cwd, { ...process.env, ...kind.env }, (line) => stderr.push(line));
+    await checkSignIn(kind, wire, cwd, { stderr: () => stderr });
+  }
 } catch (error) {
   if (!(error instanceof SetupError)) throw error;
   process.stderr.write(`${error.message}\n`);
@@ -36,10 +45,8 @@ try {
 }
 const folder = join(dirname(configPath), basename(configPath, ".json"));
 const statePath = join(folder, "state.json");
-const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 
 mkdirSync(folder, { recursive: true, mode: 0o700 });
-mkdirSync(kind.folder ?? kind.folders, { recursive: true });
 
 const joined = await joinChips({
   link,
