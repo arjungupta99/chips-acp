@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
+import { connect, fileStore, helloOnce, JoinError, join as joinChips } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
@@ -54,6 +54,12 @@ const statePath = join(folder, "state.json");
 
 mkdirSync(folder, { recursive: true, mode: 0o700 });
 
+/** A link Chips refuses (spent, expired, not a link), said plainly: its words, no stack. */
+const refused = (error: unknown): never => {
+  if (!(error instanceof JoinError)) throw error;
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+};
 const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
@@ -61,7 +67,7 @@ const joined = await joinChips({
   software: "chips-acp 0.2.0",
   wants: ["agents", "new_spaces", "new_agents", "forks", "restarts"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
-});
+}).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello. What signs its
 // agent in, where it is set, goes with it.
 keepIfAsked(LABEL, joined.url, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], log);
