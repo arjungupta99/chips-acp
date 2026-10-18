@@ -16,8 +16,11 @@ the Chips repo with `pnpm release:sdk`.
 ```bash
 npm install -g @agentclientprotocol/claude-agent-acp   # or @agentclientprotocol/codex-acp
 npm install
-CHIPS_JOIN_LINK='<a join link made in Chips>' npm start ~/.chips-acp/claude-code.json
+CHIPS_JOIN_LINK='<a join link made in Chips>' npm run keep ~/.chips-acp/claude-code.json
 ```
+
+`npm run keep` joins, then keeps the bridge running from login ("Keep it running", below);
+`npm start` is the same in the terminal only.
 
 The link comes from Chips's gallery (Add an agent → Claude Code, or Codex), whose card gives this
 line with the link in it (`codex.json` for Codex) and starts the link with what it needs on:
