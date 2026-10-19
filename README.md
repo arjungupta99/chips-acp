@@ -142,6 +142,7 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 | Question card | `elicitation/create` form of up to four choice or yes/no fields; anything else is declined |
 | Stop | `session/cancel` |
 | Steer | the next prompt of the same run, after `session/cancel` when it interrupts |
+| Not right? (Chips ADR 0200) | a `correction`, or an older device's 👎: one more turn of the agent who said the reply (by its id in the room's lines), in that room's session, quoting its reply and what was wrong; the run is *Looking again: …*; a 👍 or any other reaction is nothing, and each is answered once |
 | Restart | the agent's process stopped and run again |
 | Trouble | the agent not running; it is run again after 2 s, longer each time it fails to start |
 

@@ -15,7 +15,8 @@
  * tool calls as steps, its plan, its context gauge and cost — then its words in the room. What it
  * asks permission for is an approval card; what it asks with a form is a question card. Stop is
  * `session/cancel`. A steer is said to it as the next prompt of the same run, after stopping the
- * turn when the steer interrupts.
+ * turn when the steer interrupts. A person's "Not right?" on a reply is one more turn of the agent
+ * who said it, in that room, looking at it again.
  */
 
 import { randomBytes } from "node:crypto";
@@ -24,7 +25,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Run, Speaker, SpaceAsked } from "@chipschat/harness";
 import { promptFor, sendAnswer } from "@chipschat/harness";
-import type { AgentAsked, AgentFork, AnyEvent, MessageNew, RiskClass, StepKind } from "@chipschat/protocol";
+import type { AgentAsked, AgentFork, AnyEvent, Feedback, MessageNew, RiskClass, StepKind } from "@chipschat/protocol";
 import {
   AcpClient,
   AcpError,
@@ -104,6 +105,10 @@ const WAIT_FOR_AGENT_MS = 15_000;
 /** The longest wait before running the agent again when it keeps stopping. */
 const MOST_RESPAWN_MS = 60_000;
 const IDLE_MS = 30 * 60_000;
+/** How many feedback ids are kept as answered, so a replay or a repeat looks again once. */
+const ANSWERED = 500;
+/** The most of a reply quoted back to the agent that said it. */
+const QUOTED = 1500;
 
 /** The agent's process: one for every agent of the kind, a session for each of their rooms. */
 interface Process {
@@ -123,6 +128,8 @@ interface Asked {
   readonly message: MessageNew;
   /** The agent it was for, or none where Chips named only the harness. */
   readonly speakerId: string | undefined;
+  /** What its run is called, where not the message's first line: a second look's. */
+  readonly goal?: string | undefined;
 }
 
 /** One agent's session in one room, and the turn going in it. */
@@ -173,6 +180,8 @@ export class Bridge {
   private knew: () => void = () => undefined;
   /** Records are made one at a time, so two never take the same folder. */
   private making: Promise<unknown> = Promise.resolve();
+  /** The feedback already answered, oldest first. */
+  private readonly answered = new Set<string>();
   private sweeper?: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: BridgeOptions) {
@@ -191,6 +200,7 @@ export class Bridge {
     chips.on("message.new", (message) => after("a message", () => this.hear(message)));
     chips.on("agent.asked", (asked) => after("a new agent", () => this.make(asked)));
     chips.on("agent.fork", (fork) => after("a copy", () => this.copy(fork)));
+    chips.on("feedback", (feedback) => after("a second look", () => this.lookAgain(feedback)));
     chips.on("event", (event) => after(event.type, () => this.noted(event)));
     chips.onSpaceAsked((asked) => after("a room from the +", () => this.claim(asked)));
     await this.know(await chips.agents.list(), { forget: true });
@@ -621,7 +631,7 @@ export class Bridge {
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
-  private async hear(message: MessageNew): Promise<void> {
+  private async hear(message: MessageNew, goal?: string): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
@@ -629,9 +639,41 @@ export class Bridge {
       const record = taker === harnessId ? await this.inRoom(spaceId) : await this.recordOf(taker);
       if (record === undefined) continue;
       const room = this.roomOf(record, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker });
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, goal });
       void this.pump(room);
     }
+  }
+
+  /**
+   * A person said a reply of one of its agents wasn't right (Chips ADR 0200): a correction, or an
+   * older device's 👎. The agent who said it, found by the reply's id in the room's lines, looks
+   * again as one more turn in that room's session, told its reply and what was wrong; its answer
+   * goes in the room as any does. A reply not in the lines is the room's agent's to look at. A 👍,
+   * or any other reaction, is nothing, and each feedback is answered once.
+   */
+  private async lookAgain(feedback: Feedback): Promise<void> {
+    const { space_id: spaceId, message_id: messageId } = feedback;
+    const note = feedback.kind === "correction" ? feedback.text?.trim() || undefined : undefined;
+    const thumbsDown = feedback.kind === "reaction" && feedback.reaction === "👎";
+    if (spaceId === undefined || !messageId || (note === undefined && !thumbsDown)) return;
+    if (this.answered.has(feedback.id)) return;
+    this.answered.add(feedback.id);
+    for (const old of this.answered) {
+      if (this.answered.size <= ANSWERED) break;
+      this.answered.delete(old);
+    }
+    const context = await this.options.chips.roomContext(spaceId, { limit: 200 }).catch(() => undefined);
+    const line = context?.lines.find((each) => each.message_id === messageId);
+    // Said to the agent as a message of the person's, under an id of its own, as a claim's first words are.
+    const message = {
+      type: "message.new",
+      space_id: spaceId,
+      message_id: `again-${feedback.id}`,
+      text: lookAgainPrompt(feedback.from.display_name, line?.text, note),
+      from: feedback.from,
+      ...(line === undefined ? {} : { for: [line.from.id] }),
+    } as unknown as MessageNew;
+    await this.hear(message, lookAgainGoal(note));
   }
 
   /** For the harness itself: its agent in the room, else its own. */
@@ -669,11 +711,11 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId }: Asked): Promise<void> {
+  private async turn(room: Room, { message, speakerId, goal }: Asked): Promise<void> {
     const { record, spaceId } = room;
     const { kind } = this.options;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
-    const run = await speaker.runs.start({ spaceId, goal: goalOf(message, record.name) });
+    const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, record.name) });
     const turn: Turn = {
       run,
       speaker,
@@ -1029,6 +1071,37 @@ export function goalOf(message: MessageNew, name: string): string {
   const named = first.toLowerCase().startsWith(`@${name.toLowerCase()}`);
   const goal = named ? first.slice(name.length + 1).trim() : first.replace(/^@\S+\s*/, "");
   return (goal === "" ? `Answer ${message.from.display_name}` : goal).slice(0, 300);
+}
+
+/**
+ * What an agent is told when a person says its reply wasn't right (Chips ADR 0200): who said so,
+ * its reply where the room still has it, what was wrong, or that they didn't say, and to look again.
+ */
+export function lookAgainPrompt(who: string, reply: string | undefined, note: string | undefined): string {
+  const quoted = reply === undefined || reply.trim() === "" ? undefined : `Your reply:\n«${cut(reply.trim(), QUOTED)}»`;
+  const wrong =
+    note === undefined
+      ? "They didn't say what. Read your reply again and find what was wrong."
+      : `What wasn't right: «${note}»`;
+  return [
+    `${who} says your reply in this room wasn't right.`,
+    quoted,
+    wrong,
+    "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",
+  ]
+    .filter((part) => part !== undefined)
+    .join("\n\n");
+}
+
+/** A second look's run, as the thinking bubble says it: what was wrong, by its first line. */
+export function lookAgainGoal(note: string | undefined): string {
+  const first = note?.split("\n").find((line) => line.trim() !== "")?.trim();
+  return first === undefined ? "Looking again at its reply" : cut(`Looking again: ${first}`, 120);
+}
+
+/** At most `most` characters, the last an ellipsis where it was cut. */
+function cut(text: string, most: number): string {
+  return text.length <= most ? text : `${text.slice(0, most - 1)}…`;
 }
 
 function textOf(content: unknown): string {

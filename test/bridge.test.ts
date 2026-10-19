@@ -10,7 +10,17 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect } from "@chipschat/harness";
-import { Bridge, type BridgeState, forkName, goalOf, type KindConfig, titleFrom } from "../src/bridge.ts";
+import { type Feedback, messageIdOf, newId } from "@chipschat/protocol";
+import {
+  Bridge,
+  type BridgeState,
+  forkName,
+  goalOf,
+  type KindConfig,
+  lookAgainGoal,
+  lookAgainPrompt,
+  titleFrom,
+} from "../src/bridge.ts";
 import { type FakeAgent, fakeAgent } from "./fake-agent.ts";
 
 const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "restarts"];
@@ -337,6 +347,143 @@ describe("a new agent a person asks for", () => {
     assert.ok(nova !== undefined);
     assert.ok(chips.workspace.renameAgent(nova.agentId, "Vega").ok);
     await until(() => nova.name === "Vega");
+  });
+});
+
+/**
+ * A person's "Not right?" on a message in a room (Chips ADR 0200), as Chips hands it to the
+ * harness whose message it is: who gave it is written here, as Chips fills it in.
+ */
+function feedback(chips: FakeChips, spaceId: string, messageId: string, more: Readonly<Record<string, unknown>>) {
+  const { owner } = chips.workspace;
+  return chips.asOwner({
+    type: "feedback",
+    space_id: spaceId,
+    message_id: messageId,
+    from: { participant_id: owner.participantId, kind: "person", display_name: owner.displayName, role: "owner" },
+    ...more,
+  });
+}
+
+/** The agent's reply to words said in a room: once its run is over. */
+async function replyTo(chips: FakeChips, text: string, spaceId = chips.address.spaceId): Promise<StoredEvent> {
+  const said = await chips.say(text, spaceId);
+  const started = await sent(chips, "run.started", (event) => event.space_id === spaceId && event.seq > said.seq);
+  await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+  return sent(chips, "message.post", (event) => event.run_id === started.run_id);
+}
+
+/** A second look's run, once it is over: its start, its words and its end. */
+async function lookedAgain(chips: FakeChips, goal: string) {
+  const started = await sent(chips, "run.started", (event) => event.payload["goal"] === goal);
+  const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+  const done = await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+  return { started, words, done };
+}
+
+const looksAgain = (chips: FakeChips) =>
+  chips.workspace.log.filter((event) => event.type === "run.started" && String(event.payload["goal"]).startsWith("Looking again"));
+
+describe("a reply a person says wasn't right", () => {
+  const NOTE = "Missed what I asked. Sunday is our flight home.";
+
+  it("is looked at again by the agent who said it, in its session in that room, as a run", async () => {
+    const { chips, agent, state } = await rig();
+    const room = chips.address.spaceId;
+    // Two of the harness's agents in one room: the one who said the reply looks again, not the room's first.
+    const { askId } = await chips.askForAgent(room, "Nova");
+    const nova = await recordOf(state, await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId));
+    assert.ok(nova !== undefined);
+    await replyTo(chips, "hello");
+    const reply = await replyTo(chips, "@Nova plan Sunday");
+    assert.equal(reply.actor.id, nova.agentId);
+    const novaSession = state.sessions[`${nova.key}|${room}`];
+    const sessions = agent.made.length;
+
+    await feedback(chips, room, messageIdOf(reply.id), { kind: "correction", text: NOTE });
+    const { started, words, done } = await lookedAgain(chips, `Looking again: ${NOTE}`);
+    assert.equal(started.actor.id, nova.agentId, "Nova said it, and Nova looks again");
+    assert.equal(started.space_id, room);
+    assert.equal(words.actor.id, nova.agentId);
+    assert.equal(words.payload["text"], "Here is the answer.", "its answer, said in the room as any is");
+    assert.equal(done.payload["summary"], "Here is the answer.");
+    assert.equal(agent.made.length, sessions, "no new session");
+    assert.equal(state.sessions[`${nova.key}|${room}`], novaSession, "the session Nova's turns in the room go to");
+    const prompt = agent.prompts.at(-1) ?? "";
+    assert.match(prompt, /Arjun says your reply in this room wasn't right\./);
+    assert.ok(prompt.includes("Your reply:\n«Here is the answer.»"), prompt);
+    assert.ok(prompt.includes(`What wasn't right: «${NOTE}»`), prompt);
+    const posted = chips.workspace.log.filter((event) => event.type === "message.post" && event.seq > reply.seq);
+    assert.deepEqual(
+      posted.map((event) => event.run_id),
+      [started.run_id],
+      "nothing else is said in the room",
+    );
+  });
+
+  it("does nothing for a 👍, or any other reaction", async () => {
+    const { chips, agent } = await rig();
+    const reply = await replyTo(chips, "hello");
+    const room = chips.address.spaceId;
+    await feedback(chips, room, messageIdOf(reply.id), { kind: "reaction", reaction: "👍" });
+    await feedback(chips, room, messageIdOf(reply.id), { kind: "reaction", reaction: "🎉" });
+    // A correction after them is looked at; the reactions before it never were.
+    await feedback(chips, room, messageIdOf(reply.id), { kind: "correction", text: NOTE });
+    await lookedAgain(chips, `Looking again: ${NOTE}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(looksAgain(chips).length, 1);
+    assert.equal(agent.prompts.length, 2);
+  });
+
+  it("looks again at a bare 👎 from an older device, told they didn't say what", async () => {
+    const { chips, agent } = await rig();
+    const reply = await replyTo(chips, "hello");
+    await feedback(chips, chips.address.spaceId, messageIdOf(reply.id), { kind: "reaction", reaction: "👎" });
+    const { started, words } = await lookedAgain(chips, "Looking again at its reply");
+    assert.equal(started.actor.id, reply.actor.id);
+    assert.equal(words.payload["text"], "Here is the answer.");
+    const prompt = agent.prompts.at(-1) ?? "";
+    assert.ok(prompt.includes("They didn't say what. Read your reply again and find what was wrong."), prompt);
+    assert.ok(prompt.includes("Your reply:\n«Here is the answer.»"), prompt);
+    assert.doesNotMatch(prompt, /What wasn't right/);
+  });
+
+  it("answers each feedback once, heard again or not", async () => {
+    const { chips, client, agent } = await rig();
+    const heard: Feedback[] = [];
+    client.on("feedback", (event) => void heard.push(event));
+    const reply = await replyTo(chips, "hello");
+    await feedback(chips, chips.address.spaceId, messageIdOf(reply.id), { kind: "correction", text: NOTE });
+    await lookedAgain(chips, `Looking again: ${NOTE}`);
+    await until(() => heard.length === 1);
+    // The same event again, through the SDK's own way in, as a replay hands it over.
+    (client as unknown as { onEvent: (event: unknown) => void }).onEvent(heard[0]);
+    await until(() => heard.length === 2);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(looksAgain(chips).length, 1);
+    assert.equal(agent.prompts.length, 2);
+  });
+
+  it("is the room's agent's to look at where the room no longer has the reply, without quoting it", async () => {
+    const { chips, agent, agentId } = await rig();
+    await replyTo(chips, "hello");
+    await feedback(chips, chips.address.spaceId, newId("message"), { kind: "correction", text: NOTE });
+    const { started, words } = await lookedAgain(chips, `Looking again: ${NOTE}`);
+    assert.equal(started.actor.id, agentId, "the room's agent");
+    assert.equal(words.payload["text"], "Here is the answer.");
+    const prompt = agent.prompts.at(-1) ?? "";
+    assert.ok(prompt.includes(`What wasn't right: «${NOTE}»`), prompt);
+    assert.doesNotMatch(prompt, /Your reply:/);
+  });
+
+  it("quotes at most 1500 characters of the reply, and names its run by the note's first line", () => {
+    const prompt = lookAgainPrompt("Arjun", "x".repeat(2000), "Too long");
+    const quoted = /«(x+…)»/.exec(prompt)?.[1] ?? "";
+    assert.equal(quoted.length, 1500);
+    assert.equal(lookAgainGoal("Wrong day.\nSunday is our flight home."), "Looking again: Wrong day.");
+    assert.equal(lookAgainGoal("y".repeat(200)).length, 120);
+    assert.ok(lookAgainGoal("y".repeat(200)).endsWith("…"));
+    assert.equal(lookAgainGoal(undefined), "Looking again at its reply");
   });
 });
 
