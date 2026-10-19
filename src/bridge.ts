@@ -128,8 +128,11 @@ interface Asked {
   readonly message: MessageNew;
   /** The agent it was for, or none where Chips named only the harness. */
   readonly speakerId: string | undefined;
-  /** What its run is called, where not the message's first line: a second look's. */
-  readonly goal?: string | undefined;
+  /**
+   * A second look's (Chips ADR 0200): what its run is called, in the place of the message's first
+   * line. Its words name who asked already, so they aren't said as theirs.
+   */
+  readonly again?: string | undefined;
 }
 
 /** One agent's session in one room, and the turn going in it. */
@@ -631,7 +634,7 @@ export class Bridge {
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
-  private async hear(message: MessageNew, goal?: string): Promise<void> {
+  private async hear(message: MessageNew, again?: string): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
@@ -639,7 +642,7 @@ export class Bridge {
       const record = taker === harnessId ? await this.inRoom(spaceId) : await this.recordOf(taker);
       if (record === undefined) continue;
       const room = this.roomOf(record, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, goal });
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, again });
       void this.pump(room);
     }
   }
@@ -711,11 +714,11 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId, goal }: Asked): Promise<void> {
+  private async turn(room: Room, { message, speakerId, again }: Asked): Promise<void> {
     const { record, spaceId } = room;
     const { kind } = this.options;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
-    const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, record.name) });
+    const run = await speaker.runs.start({ spaceId, goal: again ?? goalOf(message, record.name) });
     const turn: Turn = {
       run,
       speaker,
@@ -755,7 +758,11 @@ export class Bridge {
     const { sessionId } = turn;
     turn.costAtStart = this.costs.get(sessionId);
 
-    let words = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles: true });
+    let words = promptFor(message, {
+      ...(speakerId === undefined ? {} : { taker: speakerId }),
+      ...(again === undefined ? {} : { sayWho: false }),
+      sendsFiles: true,
+    });
     const files = await this.filesFor(record, message);
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
     if (turn.cancelled) return;

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
-import { type Chips, connect } from "@chipschat/harness";
+import { type Chips, connect, SENDING_FILES } from "@chipschat/harness";
 import { type Feedback, messageIdOf, newId } from "@chipschat/protocol";
 import {
   Bridge,
@@ -410,7 +410,9 @@ describe("a reply a person says wasn't right", () => {
     assert.equal(agent.made.length, sessions, "no new session");
     assert.equal(state.sessions[`${nova.key}|${room}`], novaSession, "the session Nova's turns in the room go to");
     const prompt = agent.prompts.at(-1) ?? "";
-    assert.match(prompt, /Arjun says your reply in this room wasn't right\./);
+    // After how a file reaches the room, the words, not said as Arjun's: they name Arjun already.
+    assert.ok(prompt.startsWith(`${SENDING_FILES}\n\nArjun says your reply in this room wasn't right.\n\n`), prompt);
+    assert.doesNotMatch(prompt, /Arjun:/);
     assert.ok(prompt.includes("Your reply:\n«Here is the answer.»"), prompt);
     assert.ok(prompt.includes(`What wasn't right: «${NOTE}»`), prompt);
     const posted = chips.workspace.log.filter((event) => event.type === "message.post" && event.seq > reply.seq);
