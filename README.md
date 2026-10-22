@@ -172,7 +172,7 @@ npm run e2e
 ```
 
 The gallery's ACP card, run as a person runs it, against a scratch Chips from a Chips checkout
-(`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one), with the fake agent installed on the
+(`CHIPS_REPO`, `~/Work/Chips/chips-main` unless set; skipped without one), with the fake agent installed on the
 PATH under a name of its own (never `claude-agent-acp`, which this machine may have for real). Each
 thing not set up stops it with the link still good; then it joins with what the card grants, says
 hello once in its room, says nothing more started again, and takes up a new link in place of the key
