@@ -97,7 +97,7 @@ export interface BridgeOptions {
   readonly idleMs?: number | undefined;
 }
 
-const VERSION = "0.2.0";
+const VERSION = "1.0.0";
 /** How often a run's status and context gauge may change, so a stream of thoughts isn't a stream of events. */
 const QUIET_MS = 1500;
 /** How long a message waits for the agent to be running again before its run fails. */

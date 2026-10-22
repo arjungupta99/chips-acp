@@ -11,6 +11,15 @@ Phase 4 of Chips's `docs/proposals/open-source-harnesses-plan.md`, and Chips's
 Local only: no remote, nothing published. The `@chipschat/*` packages come from `vendor/`, packed from
 the Chips repo with `pnpm release:sdk`.
 
+## From Chips's gallery
+
+The card's line is `chips connect claude-code '<link>'` or `chips connect codex '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+`@chipschat/acp`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
+that Chips carries, so the machine needs no Node or npm of its own. The bridge checks the agent's ACP adapter and its sign-in,
+joins, and keeps itself running from login. `chips disconnect claude-code` or `chips disconnect codex` stops it. Claude Code and Codex share this one package: their cards hand it `~/.chips-acp/claude-code.json` or `codex.json`, and the file's name picks the kind. On another computer,
+`curl -fsSL https://chipschat.ai/install | sh -s -- connect claude-code '<link>'` installs Chips there
+first. The steps below run the bridge from this checkout instead, to work on it.
+
 ## Run it
 
 ```bash
@@ -176,4 +185,12 @@ The gallery's ACP card, run as a person runs it, against a scratch Chips from a 
 PATH under a name of its own (never `claude-agent-acp`, which this machine may have for real). Each
 thing not set up stops it with the link still good; then it joins with what the card grants, says
 hello once in its room, says nothing more started again, and takes up a new link in place of the key
-it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`.
+it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`, which packs this checkout and serves it from a stand-in npm registry, so the card's `chips connect` downloads, checks and runs what would be published.
+
+## Release
+
+`npm run release` builds `dist/main.js`, one file with the SDK and everything else bundled in, and
+`dist/THIRD-PARTY-NOTICES.md` beside it; runs the tests; and packs `chipschat-acp-<version>.tgz`. `npm publish`
+publishes it. A version's major is the Chips protocol it speaks, and Chips's card names that major
+(Chips ADR 0218): a fix is a minor or a patch, and reaches every card of its major the day it is
+published.

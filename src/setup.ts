@@ -115,7 +115,7 @@ export async function checkSignIn(
   try {
     let info: AgentInfo;
     try {
-      info = await within(client.initialize({ name: "chips-acp", version: "0.2.0" }), MINUTE, "it didn't answer within a minute");
+      info = await within(client.initialize({ name: "chips-acp", version: "1.0.0" }), MINUTE, "it didn't answer within a minute");
     } catch (error) {
       const last = options.stderr?.().slice(-3).join(" ") ?? "";
       throw new SetupError(`${kind.name} didn't start: ${wordsOf(error)}.${last === "" ? "" : ` It said: ${last}`} ${STILL_GOOD}`);

@@ -64,7 +64,7 @@ const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
   name: kind.name,
-  software: "chips-acp 0.2.0",
+  software: "chips-acp 1.0.0",
   wants: ["agents", "new_spaces", "new_agents", "forks", "restarts"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
@@ -79,7 +79,7 @@ let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
-  client: { name: "chips-acp", version: "0.2.0" },
+  client: { name: "chips-acp", version: "1.0.0" },
   store: fileStore(join(folder, "chips-state.json")),
   onRestart: async () => {
     log("a person asked for a restart");
