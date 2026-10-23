@@ -197,6 +197,24 @@ describe("a turn", () => {
     assert.match(prompt, /: hello there$/);
   });
 
+  it("hands the agent the message a reply answers, after what was said and before the words (Chips ADR 0219)", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("summarise the notes");
+    const started = await sent(chips, "run.started");
+    const answer = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    await sent(chips, "run.completed");
+    await chips.say("Shorter, please", undefined, { replyTo: messageIdOf(answer.id) });
+    await chips.waitFor((event) => (event.type === "run.completed" && agent.prompts.length === 2 ? event : undefined), 3000);
+    const prompt = agent.prompts[1] ?? "";
+    const quote = String(answer.payload["text"])
+      .split("\n")
+      .map((line) => (line === "" ? ">" : `> ${line}`))
+      .join("\n");
+    assert.match(prompt, /Arjun is replying to your message from today at \d{1,2}:\d{2} [AP]M\.\nYour message:\n/);
+    assert.ok(prompt.includes(`Your message:\n${quote}\n\n`), prompt);
+    assert.match(prompt, /Shorter, please$/);
+  });
+
   it("keeps one session per room, and a second message is the same session", async () => {
     const { chips, agent, state } = await rig();
     await chips.say("one");
