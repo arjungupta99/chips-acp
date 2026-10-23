@@ -5,6 +5,7 @@
  */
 
 import type { AgentInfo } from "./acp.js";
+import type { StopWords } from "@chipschat/harness";
 import type { KindConfig } from "./bridge.js";
 
 interface Known {
@@ -17,6 +18,9 @@ interface Known {
   readonly mode: string;
   /** What a person does to sign it in, in a terminal. */
   readonly signIn: string;
+  /** The same for Chips for Mac's sheet: the line to copy, and what to do with it. */
+  readonly signInLine: string;
+  readonly signInDoing: string;
 }
 
 const KNOWN: readonly Known[] = [
@@ -27,6 +31,8 @@ const KNOWN: readonly Known[] = [
     adapter: "@agentclientprotocol/claude-agent-acp",
     mode: "default",
     signIn: "run `claude`, then /login",
+    signInLine: "claude",
+    signInDoing: "Run this in a terminal, then /login, then try again.",
   },
   {
     id: "codex",
@@ -35,6 +41,8 @@ const KNOWN: readonly Known[] = [
     adapter: "@agentclientprotocol/codex-acp",
     mode: "workspace-write",
     signIn: "run `codex login`",
+    signInLine: "codex login",
+    signInDoing: "Run this in a terminal, then try again.",
   },
 ];
 
@@ -63,4 +71,28 @@ export function signedOutWords(kind: KindConfig, info?: AgentInfo): string {
   if (known !== undefined) return `${kind.name} isn't signed in on this machine: ${known.signIn} in a terminal.`;
   const ways = (info?.authMethods ?? []).map((method) => method.name);
   return `${kind.name} isn't signed in on this machine: sign it in its own way${ways.length > 0 ? ` (${ways.join(", ")})` : ""}.`;
+}
+
+/** Its adapter not installed, in a few words for Chips for Mac's sheet (Chips ADR 0218, phase 5). */
+export function notInstalledStop(kind: KindConfig, program: string): StopWords {
+  const known = knownBy(kind);
+  return {
+    detail: `${program} isn't on this Mac`,
+    says: `${kind.name}'s ACP adapter isn't installed.`,
+    ...(known === undefined
+      ? { doing: "Install the agent's ACP adapter its own way, then try again." }
+      : { doing: "Install it with npm, then try again.", copy: `npm install -g ${known.adapter}` }),
+  };
+}
+
+/** Not signed in, in a few words for Chips for Mac's sheet. */
+export function signedOutStop(kind: KindConfig): StopWords {
+  const known = knownBy(kind);
+  return {
+    detail: "Not signed in",
+    says: `${kind.name} isn't signed in.`,
+    ...(known === undefined
+      ? { doing: "Sign it in its own way, then try again." }
+      : { doing: known.signInDoing, copy: known.signInLine }),
+  };
 }

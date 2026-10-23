@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, JoinError, join as joinChips } from "@chipschat/harness";
+import { connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
@@ -37,15 +37,19 @@ try {
   kind = readConfig(configPath);
   mkdirSync(kind.folder ?? kind.folders, { recursive: true });
   if (link !== undefined) {
+    reportStep("checking", { detail: `Starting ${kind.name}'s ACP adapter` });
     checkCommand(kind);
     log(`checking that ${kind.name} starts and is signed in`);
     const cwd = kind.folder ?? kind.folders;
     const stderr: string[] = [];
     const wire = processWire(kind.command, cwd, { ...process.env, ...kind.env }, (line) => stderr.push(line));
     await checkSignIn(kind, wire, cwd, { stderr: () => stderr });
+    reportStep("checked", { detail: `${kind.name} opened a session` });
   }
 } catch (error) {
   if (!(error instanceof SetupError)) throw error;
+  // Where it stopped, in a few words for Chips for Mac's sheet; the whole sentence for a terminal.
+  reportStep("failed", error.words);
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
 }

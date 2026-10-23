@@ -8,13 +8,23 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
+import type { StopWords } from "@chipschat/harness";
 import { AcpClient, type AgentInfo, type AuthStatus, isAuthRequired, notOffered, type Wire } from "./acp.js";
 import type { KindConfig } from "./bridge.js";
-import { installWords, knownConfig, signedOutWords } from "./kinds.js";
+import { installWords, knownConfig, notInstalledStop, signedOutStop, signedOutWords } from "./kinds.js";
 
-/** Something to put right before the bridge starts, said so a person can. */
+/**
+ * Something to put right before the bridge starts, said so a person can: the message in a terminal,
+ * `words` on Chips for Mac's sheet (Chips ADR 0218, phase 5).
+ */
 export class SetupError extends Error {
   override readonly name = "SetupError";
+  constructor(
+    message: string,
+    readonly words: StopWords = {},
+  ) {
+    super(message);
+  }
 }
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
@@ -68,6 +78,7 @@ export function checkCommand(kind: KindConfig, env: NodeJS.ProcessEnv = process.
   if (!found) {
     throw new SetupError(
       `${kind.name}'s command, ${program}, isn't on this machine's PATH: ${installWords(kind)}. ${STILL_GOOD}`,
+      notInstalledStop(kind, program),
     );
   }
 }
@@ -118,17 +129,24 @@ export async function checkSignIn(
       info = await within(client.initialize({ name: "chips-acp", version: "1.0.0" }), MINUTE, "it didn't answer within a minute");
     } catch (error) {
       const last = options.stderr?.().slice(-3).join(" ") ?? "";
-      throw new SetupError(`${kind.name} didn't start: ${wordsOf(error)}.${last === "" ? "" : ` It said: ${last}`} ${STILL_GOOD}`);
+      throw new SetupError(`${kind.name} didn't start: ${wordsOf(error)}.${last === "" ? "" : ` It said: ${last}`} ${STILL_GOOD}`, {
+        detail: "Its ACP adapter didn't start",
+        says: `${kind.name} didn't start: ${wordsOf(error)}.`,
+        ...(last === "" ? {} : { doing: `It said: ${last}` }),
+      });
     }
     try {
       const { sessionId } = await within(client.newSession(cwd), MINUTE, "it didn't answer within a minute");
       if (info.closeSession) await client.closeSession(sessionId).catch(() => undefined);
     } catch (error) {
-      if (isAuthRequired(error)) throw new SetupError(`${signedOutWords(kind, info)} ${STILL_GOOD}`);
-      throw new SetupError(`${kind.name} couldn't open a session: ${wordsOf(error)}. ${STILL_GOOD}`);
+      if (isAuthRequired(error)) throw new SetupError(`${signedOutWords(kind, info)} ${STILL_GOOD}`, signedOutStop(kind));
+      throw new SetupError(`${kind.name} couldn't open a session: ${wordsOf(error)}. ${STILL_GOOD}`, {
+        detail: "It couldn't open a session",
+        says: `${kind.name} couldn't open a session: ${wordsOf(error)}.`,
+      });
     }
     if (info.reportsAuth && status === undefined) await within(said, options.waitMs ?? 6000, "").catch(() => undefined);
-    if (status?.kind === "none") throw new SetupError(`${signedOutWords(kind, info)} ${STILL_GOOD}`);
+    if (status?.kind === "none") throw new SetupError(`${signedOutWords(kind, info)} ${STILL_GOOD}`, signedOutStop(kind));
   } finally {
     client.close();
   }

@@ -42,6 +42,20 @@ describe("before the link is taken up", () => {
   it("says how to install a known kind's adapter", () => {
     const codex = readConfig(join(folder, "nowhere", "codex.json"));
     assert.throws(() => checkCommand(codex, { PATH: "/nowhere" }), stopsWith(/`npm install -g @agentclientprotocol\/codex-acp`/));
+    // In a few words for Chips for Mac's sheet (Chips ADR 0218, phase 5), with the line to copy.
+    assert.throws(
+      () => checkCommand(codex, { PATH: "/nowhere" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SetupError);
+        assert.deepEqual(error.words, {
+          detail: "codex-acp isn't on this Mac",
+          says: "Codex's ACP adapter isn't installed.",
+          doing: "Install it with npm, then try again.",
+          copy: "npm install -g @agentclientprotocol/codex-acp",
+        });
+        return true;
+      },
+    );
   });
 
   it("stops when the agent's command isn't on the PATH, and goes on once it is", () => {
