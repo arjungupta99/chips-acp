@@ -870,13 +870,13 @@ export class Bridge {
     }
     // Its last words; when it ended on a tool call, the words before it.
     const answer = turn.reply.trim() || (turn.said.at(-1) ?? "");
-    await this.sendProject(room, turn, answer);
+    const change = await this.sendProject(room, turn, answer);
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
     const { chips } = this.options;
     const post = await sendAnswer(answer, { folders: [room.record.folder], upload: (input) => chips.upload(input) });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
-      await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds });
+      await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
     }
     const cut = stop === "max_tokens" || stop === "max_turn_requests";
     const said = post.summary;
@@ -916,13 +916,19 @@ export class Bridge {
     }
   }
 
-  /** What the turn changed in its copy, sent to the room's project before its words are posted. */
-  private async sendProject(room: Room, turn: Turn, words: string): Promise<void> {
-    if (turn.project === undefined) return;
+  /**
+   * What the turn changed in its copy, sent to the room's project before its words are posted: the
+   * commit it left `main` at, for the reply to carry (Chips ADR 0222), when it sent one.
+   */
+  private async sendProject(room: Room, turn: Turn, words: string): Promise<string | undefined> {
+    if (turn.project === undefined) return undefined;
     try {
-      this.log(`${room.record.name}'s project: ${pushedInWords(await turn.project.push({ words }))}`);
+      const pushed = await turn.project.push({ words });
+      this.log(`${room.record.name}'s project: ${pushedInWords(pushed)}`);
+      return pushed.state === "sent" ? pushed.commit : undefined;
     } catch (error) {
       this.log(`${room.record.name}'s project couldn't be sent: ${messageOf(error)}`);
+      return undefined;
     }
   }
 
