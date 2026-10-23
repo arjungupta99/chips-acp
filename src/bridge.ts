@@ -23,9 +23,18 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Agent, Chips, Decision, Run, Speaker, SpaceAsked } from "@chipschat/harness";
-import { promptFor, sendAnswer } from "@chipschat/harness";
-import type { AgentAsked, AgentFork, AnyEvent, Feedback, MessageNew, RiskClass, StepKind } from "@chipschat/protocol";
+import type { Agent, Chips, Decision, Project, Run, Speaker, SpaceAsked } from "@chipschat/harness";
+import { promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
+import type {
+  AgentAsked,
+  AgentFork,
+  AnyEvent,
+  Feedback,
+  MessageNew,
+  ProjectFacts,
+  RiskClass,
+  StepKind,
+} from "@chipschat/protocol";
 import {
   AcpClient,
   AcpError,
@@ -91,6 +100,12 @@ export interface BridgeOptions {
   /** How to run the agent: its process, unless a test hands in a wire of its own. */
   readonly wire: () => Wire;
   readonly log?: ((line: string) => void) | undefined;
+  /**
+   * Whether each agent works on its room's project in a copy in its own folder (Chips ADR 0221):
+   * true when this machine has a git new enough. Agents the config puts in one `folder` of the
+   * person's work there as they always have.
+   */
+  readonly projects?: boolean | undefined;
   /** How long to wait before running the agent again after it stopped. */
   readonly respawnMs?: number | undefined;
   /** How long a session may be quiet before it is closed: half an hour unless said. */
@@ -170,6 +185,8 @@ interface Turn {
   readonly steps: Map<string, { title: string; tool: string; kind: StepKind; done: boolean }>;
   /** Tool calls a person allowed, to their approvals: the card says how each went. */
   readonly allowed: Map<string, string>;
+  /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
+  project?: Project | undefined;
 }
 
 export class Bridge {
@@ -758,10 +775,12 @@ export class Bridge {
     const { sessionId } = turn;
     turn.costAtStart = this.costs.get(sessionId);
 
+    const project = await this.projectFor(turn, record, spaceId, speakerId ?? record.agentId);
     let words = promptFor(message, {
       ...(speakerId === undefined ? {} : { taker: speakerId }),
       ...(again === undefined ? {} : { sayWho: false }),
       sendsFiles: true,
+      project,
     });
     const files = await this.filesFor(record, message);
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
@@ -851,6 +870,7 @@ export class Bridge {
     }
     // Its last words; when it ended on a tool call, the words before it.
     const answer = turn.reply.trim() || (turn.said.at(-1) ?? "");
+    await this.sendProject(room, turn, answer);
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
     const { chips } = this.options;
     const post = await sendAnswer(answer, { folders: [room.record.folder], upload: (input) => chips.upload(input) });
@@ -865,6 +885,45 @@ export class Bridge {
       summary,
       ...(cut ? { followUps: [`${room.record.name} stopped at its limit (${stop}).`] } : {}),
     });
+  }
+
+  /**
+   * The room's project for a turn (Chips ADR 0221): the agent's copy in its own folder, brought up
+   * to date, and what the turn is told of it. None for agents the config puts in one folder of the
+   * person's, nor where this machine has no git for it.
+   */
+  private async projectFor(
+    turn: Turn,
+    record: AgentRecord,
+    spaceId: string,
+    agentId: string,
+  ): Promise<ProjectFacts | undefined> {
+    if (this.options.projects !== true || this.options.kind.folder !== undefined) return undefined;
+    try {
+      const project = this.options.chips.project({
+        spaceId,
+        agentId,
+        name: record.name,
+        folder: record.folder,
+        log: (line) => this.log(line),
+      });
+      const facts = await project.pull();
+      turn.project = project;
+      return facts;
+    } catch (error) {
+      this.log(`${record.name}'s copy of the room's project couldn't be readied: ${messageOf(error)}`);
+      return undefined;
+    }
+  }
+
+  /** What the turn changed in its copy, sent to the room's project before its words are posted. */
+  private async sendProject(room: Room, turn: Turn, words: string): Promise<void> {
+    if (turn.project === undefined) return;
+    try {
+      this.log(`${room.record.name}'s project: ${pushedInWords(await turn.project.push({ words }))}`);
+    } catch (error) {
+      this.log(`${room.record.name}'s project couldn't be sent: ${messageOf(error)}`);
+    }
   }
 
   private async settleSteps(turn: Turn, status: "done" | "failed"): Promise<void> {

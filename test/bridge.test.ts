@@ -4,7 +4,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -34,6 +34,8 @@ interface Rig {
   readonly kind: KindConfig;
   /** The agent Chips gave the harness, in its own room. */
   readonly agentId: string;
+  /** What the bridge wrote to its log. */
+  readonly logs: string[];
 }
 
 const open: (() => Promise<void>)[] = [];
@@ -50,6 +52,7 @@ async function rig(
     idleMs?: number;
     folders?: string;
     folder?: string;
+    projects?: boolean;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" }));
@@ -64,13 +67,16 @@ async function rig(
     ...(options.folder === undefined ? {} : { folder: options.folder }),
     ...(options.mode === undefined ? {} : { mode: options.mode }),
   };
+  const logs: string[] = [];
   const bridge = new Bridge({
     chips: client,
     kind,
     state,
     saveState: () => undefined,
     wire: () => agent.wire(),
+    log: (line) => logs.push(line),
     respawnMs: 20,
+    ...(options.projects === undefined ? {} : { projects: options.projects }),
     ...(options.idleMs === undefined ? {} : { idleMs: options.idleMs }),
   });
   open.push(async () => {
@@ -80,7 +86,7 @@ async function rig(
   await bridge.start();
   const agents = await client.agents.list();
   const agentId = agents.find((each) => each.key === chips.address.harnessId)?.agentId ?? "";
-  return { chips, client, bridge, agent, state, kind, agentId };
+  return { chips, client, bridge, agent, state, kind, agentId, logs };
 }
 
 /** Once `done` holds, checked every few milliseconds: for what the log doesn't show. */
@@ -126,6 +132,40 @@ async function newAgent(chips: FakeChips, state: BridgeState, name: string): Pro
   await recordOf(state, await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId));
   return spaceId;
 }
+
+describe("the room's project (Chips ADR 0221)", () => {
+  it("hands the agent its copy in its folder, and sends what it left there with its next turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-acp-project-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, agent, agentId, logs } = await rig({ folders: root, projects: true });
+    await chips.say("start the notes");
+    await sent(chips, "run.completed");
+    const copy = join(root, "fakey", "room");
+    assert.ok(
+      (agent.prompts[0] ?? "").includes(`The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
+      agent.prompts[0],
+    );
+    assert.ok(logs.includes("Fakey's project: nothing to send"), logs.join("\n"));
+
+    // The turn that wrote this stopped before it could send it: the next one takes it.
+    writeFileSync(join(copy, "notes.md"), "One sentence.\n");
+    await chips.say("go on");
+    const changed = await sent(chips, "project.changed");
+    assert.equal(changed.payload["by"], agentId);
+    assert.deepEqual(changed.payload["files"], [{ path: "notes.md", added: 1, removed: 0 }]);
+    assert.match(agent.prompts[1] ?? "", /In Markdown, put each sentence on a line of its own\./);
+  });
+
+  it("leaves an agent the config puts in a folder of the person's working there, with no project", async () => {
+    const own = mkdtempSync(join(tmpdir(), "chips-acp-own-"));
+    open.push(async () => rmSync(own, { recursive: true, force: true }));
+    const { chips, agent } = await rig({ folder: own, projects: true });
+    await chips.say("look at my repo");
+    await sent(chips, "run.completed");
+    assert.doesNotMatch(agent.prompts[0] ?? "", /The room's project/);
+    assert.equal(existsSync(join(own, "room")), false);
+  });
+});
 
 describe("a turn", () => {
   it("names its run by the words after the agent's whole @name", () => {

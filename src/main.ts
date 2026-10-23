@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
+import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
@@ -91,9 +91,14 @@ const chips = await connect({
   },
 });
 
+// Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.
+const git = await checkGit();
+if (!git.ok) log(`rooms' projects are off: ${git.why}`);
+
 bridge = new Bridge({
   chips,
   kind,
+  projects: git.ok,
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
   wire: () =>
