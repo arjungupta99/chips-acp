@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/acp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "An agent that speaks the Agent Client Protocol, as a Chips harness of its kind: agents made from Chips, each in a folder of its own, each room a session.",
   "license": "Apache-2.0",
   "type": "module",
