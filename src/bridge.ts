@@ -24,7 +24,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Project, Run, Speaker, SpaceAsked } from "@chipschat/harness";
-import { promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
+import { heldNote, promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
 import type {
   AgentAsked,
   AgentFork,
@@ -870,10 +870,11 @@ export class Bridge {
     }
     // Its last words; when it ended on a tool call, the words before it.
     const answer = turn.reply.trim() || (turn.said.at(-1) ?? "");
-    const change = await this.sendProject(room, turn, answer);
+    const { change, note } = await this.sendProject(room, turn, answer);
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
     const { chips } = this.options;
-    const post = await sendAnswer(answer, { folders: [room.record.folder], upload: (input) => chips.upload(input) });
+    const words = [answer, note ?? ""].filter((part) => part !== "").join("\n\n");
+    const post = await sendAnswer(words, { folders: [room.record.folder], upload: (input) => chips.upload(input) });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
       await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
@@ -918,17 +919,22 @@ export class Bridge {
 
   /**
    * What the turn changed in its copy, sent to the room's project before its words are posted: the
-   * commit it left `main` at, for the reply to carry (Chips ADR 0222), when it sent one.
+   * commit it left `main` at, for the reply to carry (Chips ADR 0222), when it sent one; else, when
+   * the change didn't go, the line the reply says so in (Chips AP-6).
    */
-  private async sendProject(room: Room, turn: Turn, words: string): Promise<string | undefined> {
-    if (turn.project === undefined) return undefined;
+  private async sendProject(room: Room, turn: Turn, words: string): Promise<{ change?: string; note?: string }> {
+    if (turn.project === undefined) return {};
+    const name = room.record.name;
     try {
       const pushed = await turn.project.push({ words });
-      this.log(`${room.record.name}'s project: ${pushedInWords(pushed)}`);
-      return pushed.state === "sent" ? pushed.commit : undefined;
+      this.log(`${name}'s project: ${pushedInWords(pushed)}`);
+      if (pushed.state === "sent") return { change: pushed.commit };
+      const note = heldNote(pushed, name);
+      return note === undefined ? {} : { note };
     } catch (error) {
-      this.log(`${room.record.name}'s project couldn't be sent: ${messageOf(error)}`);
-      return undefined;
+      this.log(`${name}'s project couldn't be sent: ${messageOf(error)}`);
+      const note = heldNote({ state: "failed", why: messageOf(error) }, name);
+      return note === undefined ? {} : { note };
     }
   }
 
