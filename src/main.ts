@@ -115,7 +115,7 @@ log(`connected as ${chips.harnessId} (${kind.name}), ${Object.keys(state.agents)
 await helloOnce(joined, {
   name: kind.name,
   say: (spaceId) =>
-    chips.post({ spaceId, text: `Hi, ${kind.name} here, through chips-acp. Make me an agent from any room, or ask me here.` }),
+    chips.post({ spaceId, text: `Hi, ${kind.name} here, through chips-acp. Make me an agent from any space, or ask me here.` }),
 }).catch((error: unknown) => log(`hello not said: ${String(error)}`));
 
 const stop = () => {

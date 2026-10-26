@@ -142,7 +142,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     await sent(chips, "run.completed");
     const copy = join(root, "fakey", "room");
     assert.ok(
-      (agent.prompts[0] ?? "").includes(`The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
+      (agent.prompts[0] ?? "").includes(`The space's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
       agent.prompts[0],
     );
     assert.ok(logs.includes("Fakey's project: nothing to send"), logs.join("\n"));
@@ -169,7 +169,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const posted = await sent(chips, "message.post", (event) => String(event.payload["text"] ?? "").includes("(Not in"));
     assert.match(
       String(posted.payload["text"]),
-      /\n\n\(Not in the room's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
+      /\n\n\(Not in the space's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
     );
     assert.equal(posted.payload["change"], undefined);
   });
@@ -180,7 +180,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const { chips, agent } = await rig({ folder: own, projects: true });
     await chips.say("look at my repo");
     await sent(chips, "run.completed");
-    assert.doesNotMatch(agent.prompts[0] ?? "", /The room's project/);
+    assert.doesNotMatch(agent.prompts[0] ?? "", /The space's project/);
     assert.equal(existsSync(join(own, "room")), false);
   });
 });
@@ -251,7 +251,7 @@ describe("a turn", () => {
     await chips.say("hello there");
     await sent(chips, "run.completed");
     const prompt = agent.prompts[0] ?? "";
-    assert.match(prompt, /In this room:/);
+    assert.match(prompt, /In this space:/);
     assert.match(prompt, /: hello there$/);
   });
 
@@ -488,7 +488,7 @@ describe("a reply a person says wasn't right", () => {
     assert.equal(state.sessions[`${nova.key}|${room}`], novaSession, "the session Nova's turns in the room go to");
     const prompt = agent.prompts.at(-1) ?? "";
     // After how a file reaches the room, the words, not said as Arjun's: they name Arjun already.
-    assert.ok(prompt.startsWith(`${SENDING_FILES}\n\nArjun says your reply in this room wasn't right.\n\n`), prompt);
+    assert.ok(prompt.startsWith(`${SENDING_FILES}\n\nArjun says your reply in this space wasn't right.\n\n`), prompt);
     assert.doesNotMatch(prompt, /Arjun:/);
     assert.ok(prompt.includes("Your reply:\n«Here is the answer.»"), prompt);
     assert.ok(prompt.includes(`What wasn't right: «${NOTE}»`), prompt);

@@ -1162,7 +1162,7 @@ export function lookAgainPrompt(who: string, reply: string | undefined, note: st
       ? "They didn't say what. Read your reply again and find what was wrong."
       : `What wasn't right: «${note}»`;
   return [
-    `${who} says your reply in this room wasn't right.`,
+    `${who} says your reply in this space wasn't right.`,
     quoted,
     wrong,
     "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",
