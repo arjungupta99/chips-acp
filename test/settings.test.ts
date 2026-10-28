@@ -504,7 +504,8 @@ describe("an agent's model (Chips ADRs 0140, 0241)", () => {
     // The look: one session in the harness's folder, let go, with nothing said to it.
     const look = agent.made[0] ?? "";
     assert.equal(agent.cwds.get(look), at.kind.folders);
-    assert.deepEqual(agent.closed, [look]);
+    // The copy can reach Chips before the look is let go: a loaded machine showed it so.
+    assert.deepEqual(await until(() => agent.closed.length > 0 && agent.closed), [look]);
     assert.deepEqual(agent.prompts, []);
     assert.deepEqual(at.state.models?.default, { model: "default", effort: "high" });
   });
