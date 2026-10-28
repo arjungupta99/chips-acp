@@ -17,23 +17,46 @@
  * `session/cancel`. A steer is said to it as the next prompt of the same run, after stopping the
  * turn when the steer interrupts. A person's "Not right?" on a reply is one more turn of the agent
  * who said it, in that room, looking at it again.
+ *
+ * Each agent's page shows its context window, kept by the bridge from what the agent says
+ * (`windows.ts`), and for Claude Code and Codex the files the agent is built from (`context.ts`).
+ * A person's Compact now is `/compact` said to the agent's session as a turn of its own; a person's
+ * edit of a file starts that agent's sessions again before its next turn, so it reads what changed.
  */
 
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Agent, Chips, Decision, Project, Run, Speaker, SpaceAsked } from "@chipschat/harness";
-import { heldNote, promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
 import type {
-  AgentAsked,
-  AgentFork,
-  AnyEvent,
-  Feedback,
-  MessageNew,
-  ProjectFacts,
-  RiskClass,
-  StepKind,
+  Agent,
+  AgentContextCopy,
+  AgentContextWindowCopy,
+  Chips,
+  Decision,
+  HarnessContextCopy,
+  Project,
+  Run,
+  SettingsHandlers,
+  Speaker,
+  SpaceAsked,
+} from "@chipschat/harness";
+import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer } from "@chipschat/harness";
+import {
+  type AgentAsked,
+  type AgentFork,
+  type AnyEvent,
+  type ContextEditFrame,
+  type Feedback,
+  type LastCompaction,
+  LONG_TURN_FOLDS_MAX,
+  type MessageNew,
+  type ProjectFacts,
+  type RiskClass,
+  type StepKind,
+  type WindowChangeFrame,
+  type WindowCompactFrame,
 } from "@chipschat/protocol";
 import {
   AcpClient,
@@ -46,7 +69,21 @@ import {
   type SessionUpdate,
   type Wire,
 } from "./acp.js";
-import { signedOutWords } from "./kinds.js";
+import { settingsLayers } from "./claude-settings.js";
+import { ContextFiles, type Places, placesOf } from "./context.js";
+import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
+import {
+  bridgeLimit,
+  CODEX_COMPACTED,
+  claudeLimit,
+  claudeOwn,
+  claudeSessionSettings,
+  compactionFacts,
+  isCompaction,
+  type KeptWindow,
+  pastLimit,
+  windowCopy,
+} from "./windows.js";
 
 /** The kind of agent this harness is, and how to run it. */
 export interface KindConfig {
@@ -90,6 +127,8 @@ export interface BridgeState {
   sessions: Record<string, string>;
   /** The harness's agents, by key. */
   agents: Record<string, AgentRecord>;
+  /** Each agent's context window as it last said, by key (Chips ADR 0146): sent again after a restart. */
+  windows?: Record<string, KeptWindow>;
 }
 
 export interface BridgeOptions {
@@ -110,6 +149,13 @@ export interface BridgeOptions {
   readonly respawnMs?: number | undefined;
   /** How long a session may be quiet before it is closed: half an hour unless said. */
   readonly idleMs?: number | undefined;
+  /**
+   * The environment the agent runs in, for where its files are (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`)
+   * and what beats its settings: this process's with the kind's, unless a test hands in its own.
+   */
+  readonly env?: NodeJS.ProcessEnv | undefined;
+  /** The person's home, where `~/.claude` and `~/.codex` are: this machine's unless said. */
+  readonly home?: string | undefined;
 }
 
 const VERSION = "1.0.0";
@@ -133,6 +179,11 @@ interface Process {
   auth?: string | undefined;
   /** Sessions open in this process, so a stored one is loaded once. */
   readonly live: Set<string>;
+  /**
+   * Live sessions to close and load again before their next turn: a file they read was changed
+   * from Chips, or the settings they start with. The agent reads its files when a session starts.
+   */
+  readonly stale: Set<string>;
   stopping: boolean;
   /** How many times in a row it stopped without saying hello: the wait to run it again grows. */
   failures: number;
@@ -150,6 +201,13 @@ interface Asked {
   readonly again?: string | undefined;
 }
 
+/** A compaction a room's session is to have, after the turn going in it: a person's, or past its limit. */
+interface CompactAsk {
+  readonly by: LastCompaction["by"];
+  /** The person's Compact now it answers. */
+  readonly changeId?: string | undefined;
+}
+
 /** One agent's session in one room, and the turn going in it. */
 interface Room {
   readonly record: AgentRecord;
@@ -157,6 +215,8 @@ interface Room {
   readonly queue: Asked[];
   busy: boolean;
   turn?: Turn | undefined;
+  /** A compaction to run before the next message. */
+  compact?: CompactAsk | undefined;
   /** When it last ended a turn, for closing it once it has been quiet a while. */
   usedAt: number;
 }
@@ -187,10 +247,34 @@ interface Turn {
   readonly allowed: Map<string, string>;
   /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
   project?: Project | undefined;
+  /** The most its session held during the turn, and how many times it compacted itself in it. */
+  peak: number;
+  folds: number;
+}
+
+/** A compaction a session is in, or last had, by its tool call (or its words, Codex's old way). */
+interface Compaction {
+  readonly id: string;
+  from?: number | undefined;
+  to?: number | undefined;
+  /** Who asked, where the agent says (Claude Code's `trigger`). */
+  by?: LastCompaction["by"] | undefined;
+  done: boolean;
+  /** What the session said it held while compacting: Codex says its after-size just before it is done. */
+  latest?: number | undefined;
+  /** What it came to, once it has. */
+  finished?: LastCompaction | undefined;
+}
+
+/** One of the bridge's own `/compact` turns: who it is for, and what came of it. */
+interface CompactRun {
+  readonly by: LastCompaction["by"];
+  words: string;
+  done: boolean;
 }
 
 export class Bridge {
-  private readonly process: Process = { live: new Set(), stopping: false, failures: 0 };
+  private readonly process: Process = { live: new Set(), stale: new Set(), stopping: false, failures: 0 };
   private readonly rooms = new Map<string, Room>();
   /** The cost each session has run up, as the agent last said. */
   private readonly costs = new Map<string, number>();
@@ -203,12 +287,37 @@ export class Bridge {
   /** The feedback already answered, oldest first. */
   private readonly answered = new Set<string>();
   private sweeper?: NodeJS.Timeout | undefined;
+  /** The environment the agent runs in. */
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly places: Places;
+  /** Claude Code or Codex, whose files and limits this bridge knows; nothing for any other kind. */
+  private readonly knownKind: KnownId | undefined;
+  /** The files the agents are built from (Chips ADR 0134), for the two kinds this bridge knows. */
+  private readonly files: ContextFiles | undefined;
+  /** Whether the agent said it takes `/compact` (`available_commands_update`): any kind but the two known. */
+  private offersCompact = false;
+  /** Each session's last `used`, for where a compaction began. */
+  private readonly sessionUsed = new Map<string, number>();
+  private readonly compactions = new Map<string, Compaction>();
+  /** The bridge's own `/compact` turns, by session. */
+  private readonly compactRuns = new Map<string, CompactRun>();
+  /** Agents compacting now, by key: waiting for a turn to end, or under way. */
+  private readonly compacting = new Map<string, "queued" | "running">();
+  /** A window copy to send in a moment, by agent key: readings come in bursts. */
+  private readonly windowTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
     this.known = new Promise((resolve) => {
       this.knew = resolve;
     });
+    this.env = options.env ?? adapterEnv(options.kind, { ...process.env, ...options.kind.env });
+    this.places = placesOf(this.env, options.home ?? homedir());
+    this.knownKind = knownIdOf(options.kind);
+    this.files =
+      this.knownKind === undefined
+        ? undefined
+        : new ContextFiles(this.knownKind, options.kind, this.places, codexDocBytes(this.env));
   }
 
   /** Hear what Chips asks, learn the agents Chips has, run the agent, and close idle sessions. */
@@ -225,6 +334,9 @@ export class Bridge {
     chips.onSpaceAsked((asked) => after("a room from the +", () => this.claim(asked)));
     await this.know(await chips.agents.list(), { forget: true });
     this.knew();
+    // What each agent is built from, and how full it last said it was (Chips ADRs 0134, 0146).
+    await this.sendContexts();
+    for (const record of this.records()) await this.sendWindow(record);
     await this.run();
     const idleMs = this.options.idleMs ?? IDLE_MS;
     this.sweeper = setInterval(() => void this.sweep(idleMs), Math.max(10, Math.min(60_000, idleMs / 2)));
@@ -245,6 +357,8 @@ export class Bridge {
     this.process.stopping = true;
     this.process.client?.close();
     clearInterval(this.sweeper);
+    for (const timer of this.windowTimers.values()) clearTimeout(timer);
+    this.windowTimers.clear();
   }
 
   // ------------------------------------------------------------------ the agents
@@ -294,7 +408,10 @@ export class Bridge {
         };
         changed = true;
       }
-      if (changed) this.save();
+      if (changed) {
+        this.save();
+        this.contextsChanged();
+      }
     });
     if (!forget) return;
     for (const record of this.records()) {
@@ -358,6 +475,7 @@ export class Bridge {
     record.agentId = agent.agentId;
     record.name = agent.name;
     this.save();
+    this.contextsChanged();
   }
 
   /**
@@ -465,6 +583,7 @@ export class Bridge {
         };
         this.options.state.agents[key] = made;
         this.save();
+        this.contextsChanged();
         return made;
       }));
     this.log(`${agent.name} claimed ${spaceId}, in ${record.folder}`);
@@ -513,6 +632,11 @@ export class Bridge {
     const record = state.agents[key];
     if (record === undefined) return;
     delete state.agents[key];
+    delete state.windows?.[key];
+    this.compacting.delete(key);
+    clearTimeout(this.windowTimers.get(key));
+    this.windowTimers.delete(key);
+    if (record.agentId !== "") this.options.chips.settings.forget(record.agentId);
     for (const [id, room] of this.rooms) {
       if (room.record.key !== key) continue;
       room.queue.length = 0;
@@ -527,6 +651,7 @@ export class Bridge {
       }
     }
     this.save();
+    this.contextsChanged();
     this.log(`${record.name} deleted; its folder stays, ${record.folder}`);
   }
 
@@ -536,6 +661,7 @@ export class Bridge {
     const proc = this.process;
     const { name } = this.options.kind;
     proc.live.clear();
+    proc.stale.clear();
     proc.info = undefined;
     let wire: Wire;
     try {
@@ -638,6 +764,7 @@ export class Bridge {
       try {
         await client.closeSession(sessionId);
         live.delete(sessionId);
+        this.process.stale.delete(sessionId);
         this.log(`${room.record.name}'s session in ${room.spaceId} closed, quiet ${Math.round(idleMs / 60_000)} min`);
       } catch (error) {
         this.log(`${room.record.name}'s session in ${room.spaceId} stays open: ${messageOf(error)}`);
@@ -716,6 +843,23 @@ export class Bridge {
 
   private async pump(room: Room): Promise<void> {
     if (room.busy) return;
+    const compact = room.compact;
+    if (compact !== undefined) {
+      // A compaction asked for while a turn ran goes before the next message.
+      room.compact = undefined;
+      room.busy = true;
+      try {
+        await this.compactIn(room, compact);
+      } catch (error) {
+        this.compacting.delete(room.record.key);
+        this.log(`${room.record.name} not compacted: ${messageOf(error)}`);
+      } finally {
+        room.busy = false;
+        room.usedAt = Date.now();
+        void this.pump(room);
+      }
+      return;
+    }
     const asked = room.queue.shift();
     if (asked === undefined) return;
     room.busy = true;
@@ -725,8 +869,10 @@ export class Bridge {
       this.log(`a turn of ${room.record.name} went wrong: ${String(error)}`);
     } finally {
       room.busy = false;
+      const ended = room.turn;
       room.turn = undefined;
       room.usedAt = Date.now();
+      if (ended !== undefined) this.turnEnded(room, ended);
       void this.pump(room);
     }
   }
@@ -750,6 +896,8 @@ export class Bridge {
       gaugeAt: 0,
       steps: new Map(),
       allowed: new Map(),
+      peak: 0,
+      folds: 0,
     };
     room.turn = turn;
     // Heard from the start, so a Stop while the session is still opening stops it too.
@@ -800,16 +948,20 @@ export class Bridge {
     await this.finish(room, turn, stop);
   }
 
-  /** The room's session: the one it had, loaded once, or a new one, in the agent's folder. */
+  /**
+   * The room's session: the one it had, loaded once, or a new one, in the agent's folder. One a
+   * change from Chips made stale is closed and loaded again first, so the agent reads what changed.
+   */
   private async sessionFor(record: AgentRecord, client: AcpClient, spaceId: string): Promise<string> {
     const { state } = this.options;
     const { live, info } = this.process;
     const key = `${record.key}|${spaceId}`;
     const kept = state.sessions[key];
+    if (kept !== undefined && live.has(kept) && this.process.stale.has(kept)) await this.reopen(client, record, kept);
     if (kept !== undefined && live.has(kept)) return kept;
     if (kept !== undefined && info?.loadSession === true) {
       try {
-        await client.loadSession(kept, record.folder);
+        await client.loadSession(kept, record.folder, [], this.sessionMeta(record));
         live.add(kept);
         await this.moded(client, kept);
         return kept;
@@ -817,12 +969,36 @@ export class Bridge {
         this.log(`${record.name} couldn't load ${kept}: ${messageOf(error)}; starting afresh`);
       }
     }
-    const made = await client.newSession(record.folder);
+    const made = await client.newSession(record.folder, [], this.sessionMeta(record));
     live.add(made.sessionId);
     await this.moded(client, made.sessionId);
     state.sessions[key] = made.sessionId;
     this.save();
     return made.sessionId;
+  }
+
+  /**
+   * A stale session closed, where the agent closes and loads them, so its next turn loads it again
+   * and the agent reads its files and its settings afresh. Elsewhere it goes on as it is.
+   */
+  private async reopen(client: AcpClient, record: AgentRecord, sessionId: string): Promise<void> {
+    const { info, live, stale } = this.process;
+    stale.delete(sessionId);
+    if (info?.closeSession !== true || !info.loadSession) return;
+    try {
+      await client.closeSession(sessionId);
+      live.delete(sessionId);
+      this.log(`${record.name}'s session ${sessionId} closed, to start again with what changed`);
+    } catch (error) {
+      this.log(`${record.name}'s session ${sessionId} stays open: ${messageOf(error)}`);
+    }
+  }
+
+  /** What a session of the agent starts with beside its folder: Claude Code's settings for the limit a person picked. */
+  private sessionMeta(record: AgentRecord): Record<string, unknown> | undefined {
+    if (this.knownKind !== "claude-code" || this.claudeFixed()) return undefined;
+    const settings = claudeSessionSettings(this.options.state.windows?.[record.key]);
+    return settings === undefined ? undefined : { claudeCode: { options: { settings } } };
   }
 
   /** The session into the mode the config names, or left in its own when the agent won't. */
@@ -959,12 +1135,18 @@ export class Bridge {
 
   private updated(sessionId: string, update: SessionUpdate): void {
     if (update.sessionUpdate === "usage_update") this.costed(sessionId, update);
+    // How full it is, and its compactions, whether a turn of Chips's is going or not.
+    this.watched(sessionId, update);
     const turn = this.turnOf(sessionId);
-    if (turn === undefined) return; // a loaded session's history, or a turn already over
+    if (turn === undefined) return; // a loaded session's history, a turn already over, or a compaction
     switch (update.sessionUpdate) {
-      case "agent_message_chunk":
-        turn.reply += textOf(update["content"]);
+      case "agent_message_chunk": {
+        const text = textOf(update["content"]);
+        // Codex saying it compacted itself is no word of its reply: the window says it.
+        if (text.trim() === CODEX_COMPACTED) return;
+        turn.reply += text;
         return;
+      }
       case "agent_thought_chunk":
         turn.thought += textOf(update["content"]);
         this.sayThought(turn);
@@ -1064,6 +1246,421 @@ export class Bridge {
     if (steps.length > 0) await turn.run.plan(steps).catch(() => undefined);
   }
 
+  // ------------------------------------------------------------------ what the agents read (Chips ADRs 0134, 0238)
+
+  /** The folders of the agents Chips has, for how many of them read each shared file. */
+  private folders(): string[] {
+    return this.records()
+      .filter((record) => record.agentId !== "")
+      .map((record) => record.folder);
+  }
+
+  /** The agents came or went: the copies sent again where they changed (Chips takes the same copy once). */
+  private contextsChanged(): void {
+    if (this.files !== undefined) void this.sendContexts();
+  }
+
+  /** The harness's own set and each agent's files, as they are on disk now. */
+  private async sendContexts(): Promise<void> {
+    const files = this.files;
+    if (files === undefined) return;
+    await this.options.chips.settings
+      .harnessContext(files.harnessCopy(this.folders()))
+      .catch((error: unknown) => this.log(`${this.options.kind.name}'s shared files not sent: ${messageOf(error)}`));
+    for (const record of this.records()) await this.sendContext(record);
+  }
+
+  private async sendContext(record: AgentRecord): Promise<void> {
+    if (this.files === undefined || record.agentId === "") return;
+    await this.options.chips.settings
+      .context(record.agentId, this.files.agentCopy(record.folder))
+      .catch((error: unknown) => this.log(`${record.name}'s files not sent: ${messageOf(error)}`));
+  }
+
+  /**
+   * A person's edit of a file from Chips: saved where the agent reads it, and answered with the copy
+   * as it is now. Each agent that reads it starts its sessions again before its next turn, so the
+   * change applies from the next message: an agent and its copies share a folder, and every agent
+   * reads the harness's own set.
+   */
+  async contextEdited(edit: ContextEditFrame): Promise<AgentContextCopy | HarnessContextCopy> {
+    const files = this.files;
+    if (files === undefined) throw new Refuse(`${this.options.kind.name} keeps no files of its agents here.`);
+    await this.known;
+    if (edit.agent_id === undefined) {
+      await files.saveShared(this.folders(), edit);
+      this.log(`${this.options.kind.name}'s ${edit.name} saved from Chips`);
+      this.reload(this.records());
+      return files.harnessCopy(this.folders());
+    }
+    const record = await this.recordOf(edit.agent_id);
+    if (record === undefined) throw new Refuse("This harness has no such agent.");
+    await files.saveAgent(record.folder, edit);
+    this.log(`${record.name}'s ${edit.name} saved from Chips`);
+    const sharing = this.records().filter((each) => each.folder === record.folder);
+    this.reload(sharing);
+    for (const each of sharing) if (each !== record) void this.sendContext(each);
+    return files.agentCopy(record.folder);
+  }
+
+  /** The agents' live sessions marked to start again before their next turn. */
+  private reload(records: readonly AgentRecord[]): void {
+    const { live, stale } = this.process;
+    for (const record of records) {
+      for (const [id, sessionId] of Object.entries(this.options.state.sessions)) {
+        if (id.startsWith(`${record.key}|`) && live.has(sessionId)) stale.add(sessionId);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ how full each agent is (Chips ADR 0146)
+
+  /** The agent and room a session is. */
+  private placeOf(sessionId: string): { record: AgentRecord; spaceId: string } | undefined {
+    for (const [id, each] of Object.entries(this.options.state.sessions)) {
+      if (each !== sessionId) continue;
+      const at = id.indexOf("|");
+      const record = this.options.state.agents[id.slice(0, at)];
+      if (record !== undefined) return { record, spaceId: id.slice(at + 1) };
+    }
+    return undefined;
+  }
+
+  private kept(): Record<string, KeptWindow> {
+    this.options.state.windows ??= {};
+    return this.options.state.windows;
+  }
+
+  /** Whether `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sets Claude Code's limit, which nothing here beats. */
+  private claudeFixed(): boolean {
+    return this.knownKind === "claude-code" && claudeOwn(this.env, [], undefined, 1_000_000).fixed;
+  }
+
+  /** Whether the bridge keeps the agents' limit and compacts past it: every kind but Claude Code, which keeps its own. */
+  private keepsLimit(): boolean {
+    return this.knownKind === "codex" || (this.knownKind === undefined && this.offersCompact);
+  }
+
+  /** An agent's copy, from what it last said: nothing until it has said. */
+  private windowCopy(record: AgentRecord): AgentContextWindowCopy | undefined {
+    const kept = this.options.state.windows?.[record.key];
+    if (kept === undefined) return undefined;
+    const compacts = this.knownKind !== undefined || this.offersCompact;
+    const limit =
+      this.knownKind === "claude-code"
+        ? claudeLimit(kept, claudeOwn(this.env, settingsLayers(this.places.claudeHome, record.folder), kept.model, kept.window))
+        : compacts
+          ? bridgeLimit(kept)
+          : { editable: false };
+    return windowCopy(kept, {
+      compacting: this.compacting.get(record.key),
+      compacts,
+      whyNot: "This agent has no compact command.",
+      ...limit,
+    });
+  }
+
+  /** An agent's copy sent now, and kept with the bridge's agents. */
+  private async sendWindow(record: AgentRecord): Promise<void> {
+    clearTimeout(this.windowTimers.get(record.key));
+    this.windowTimers.delete(record.key);
+    const copy = this.windowCopy(record);
+    if (copy === undefined || record.agentId === "") return;
+    this.save();
+    await this.options.chips.settings
+      .contextWindow(record.agentId, copy)
+      .catch((error: unknown) => this.log(`${record.name}'s context window not sent: ${messageOf(error)}`));
+  }
+
+  /** An agent's copy sent in a moment: a turn says how full it is after each step. */
+  private windowSoon(record: AgentRecord): void {
+    if (this.windowTimers.has(record.key)) return;
+    const timer = setTimeout(() => {
+      this.windowTimers.delete(record.key);
+      void this.sendWindow(record);
+    }, QUIET_MS);
+    timer.unref();
+    this.windowTimers.set(record.key, timer);
+  }
+
+  /** What any session says of its window and its compactions, heard whether a turn of Chips's is going or not. */
+  private watched(sessionId: string, update: SessionUpdate): void {
+    switch (update.sessionUpdate) {
+      case "usage_update":
+        this.reading(sessionId, update);
+        return;
+      case "tool_call":
+      case "tool_call_update":
+        this.compactionStep(sessionId, update);
+        return;
+      case "agent_message_chunk": {
+        const text = textOf(update["content"]);
+        const run = this.compactRuns.get(sessionId);
+        if (run !== undefined) run.words += text;
+        if (text.trim() === CODEX_COMPACTED) this.saidCompacted(sessionId);
+        return;
+      }
+      case "available_commands_update": {
+        const commands = update["availableCommands"];
+        if (Array.isArray(commands) && commands.some((each) => (each as { name?: unknown } | null)?.name === "compact")) {
+          this.offersCompact = true;
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  /**
+   * How full a session is: the turn's height, where a compaction came to, and the agent's reading.
+   * Claude Code's `size` is its model's window once a turn has a result (the update with the cost);
+   * before that it may be a guess, so its window is the one it said last.
+   */
+  private reading(sessionId: string, update: SessionUpdate): void {
+    const used = update["used"];
+    const size = update["size"];
+    if (typeof used !== "number" || typeof size !== "number" || !(used >= 0) || !(size > 0)) return;
+    const turn = this.turnOf(sessionId);
+    if (turn !== undefined) turn.peak = Math.max(turn.peak, used);
+    this.sessionUsed.set(sessionId, used);
+    const compaction = this.compactions.get(sessionId);
+    if (compaction !== undefined && compaction.finished === undefined) {
+      if (!compaction.done) compaction.latest = used;
+      else if (compaction.to === undefined) {
+        compaction.to = used;
+        this.compacted(sessionId, compaction);
+      }
+    }
+    const record = this.placeOf(sessionId)?.record;
+    if (record === undefined) return;
+    const windows = this.kept();
+    const kept = windows[record.key];
+    const trusted = this.knownKind !== "claude-code" || update["cost"] !== undefined;
+    const window = trusted ? size : kept?.window;
+    if (window === undefined) return;
+    const meta = update["_meta"] as Record<string, unknown> | undefined;
+    const model = typeof meta?.["_claude/model"] === "string" ? meta["_claude/model"] : kept?.model;
+    // A compaction before its first reading Claude Code could be sure of (in its first turn) is its last.
+    const before = kept === undefined ? this.compactions.get(sessionId)?.finished : undefined;
+    windows[record.key] = {
+      ...(before === undefined ? {} : { last: before }),
+      ...kept,
+      used: Math.round(used),
+      window: Math.round(window),
+      ...(model === undefined ? {} : { model }),
+      asOf: new Date().toISOString(),
+      session: sessionId,
+    };
+    this.windowSoon(record);
+  }
+
+  /**
+   * A tool call of a compaction: begun, where Claude Code says from how much and to how much
+   * (`rawOutput`, after it says it completed), done. Another tool call is nothing here.
+   */
+  private compactionStep(sessionId: string, update: SessionUpdate): void {
+    const id = String(update["toolCallId"] ?? "");
+    if (id === "") return;
+    let compaction = this.compactions.get(sessionId);
+    if (compaction?.id !== id) {
+      if (update.sessionUpdate !== "tool_call" || !isCompaction(update)) return;
+      compaction = { id, from: this.sessionUsed.get(sessionId), done: false };
+      this.compactions.set(sessionId, compaction);
+    }
+    const facts = compactionFacts(update);
+    if (facts.from !== undefined) compaction.from = facts.from;
+    if (facts.to !== undefined) compaction.to = facts.to;
+    if (facts.by !== undefined) compaction.by = facts.by;
+    if (compaction.finished !== undefined) {
+      if (facts.from !== undefined || facts.to !== undefined) this.corrected(sessionId, compaction);
+      return;
+    }
+    const status = update["status"];
+    if (status === "failed") {
+      this.compactions.delete(sessionId);
+      return;
+    }
+    if (status === "completed") {
+      compaction.done = true;
+      compaction.to ??= compaction.latest;
+    }
+    if (compaction.done && compaction.to !== undefined) this.compacted(sessionId, compaction);
+  }
+
+  /** Codex's old way, its words that it compacted, with no tool call: one done, to what it says next. */
+  private saidCompacted(sessionId: string): void {
+    const last = this.compactions.get(sessionId);
+    const lately = last?.finished !== undefined && Date.now() - Date.parse(last.finished.at) < 5000;
+    if (last !== undefined && (last.finished === undefined || lately)) return;
+    this.compactions.set(sessionId, { id: `said-${Date.now()}`, from: this.sessionUsed.get(sessionId), done: true });
+  }
+
+  /** A compaction done: its agent's last, counted in the turn it was in, and the copy sent. */
+  private compacted(sessionId: string, compaction: Compaction): void {
+    const run = this.compactRuns.get(sessionId);
+    const to = Math.round(compaction.to ?? 0);
+    const last: LastCompaction = {
+      at: new Date().toISOString(),
+      from: Math.round(compaction.from ?? to),
+      to,
+      by: run?.by ?? compaction.by ?? "itself",
+    };
+    compaction.finished = last;
+    if (run !== undefined) run.done = true;
+    const turn = this.turnOf(sessionId);
+    if (turn !== undefined && last.by === "itself") turn.folds += 1;
+    this.sessionUsed.set(sessionId, to);
+    const record = this.placeOf(sessionId)?.record;
+    const kept = record === undefined ? undefined : this.options.state.windows?.[record.key];
+    if (record === undefined || kept === undefined) return;
+    kept.last = last;
+    kept.used = to;
+    kept.asOf = last.at;
+    kept.session = sessionId;
+    this.log(`${record.name} compacted (${last.by}), ${last.from} to ${last.to} tokens`);
+    void this.sendWindow(record);
+  }
+
+  /** Claude Code's own count of a compaction, heard after it said it was done: the last put right. */
+  private corrected(sessionId: string, compaction: Compaction): void {
+    const before = compaction.finished;
+    if (before === undefined) return;
+    const last: LastCompaction = {
+      ...before,
+      from: Math.round(compaction.from ?? before.from),
+      to: Math.round(compaction.to ?? before.to),
+    };
+    compaction.finished = last;
+    const record = this.placeOf(sessionId)?.record;
+    const kept = record === undefined ? undefined : this.options.state.windows?.[record.key];
+    if (record === undefined || kept?.last?.at !== before.at) return;
+    kept.last = last;
+    void this.sendWindow(record);
+  }
+
+  /**
+   * A turn of Chips's ended: the agent's files read again, in case it changed them (Claude Code
+   * writes its memory), how full it got if that passed half its window, and, where the bridge
+   * keeps its limit, a compaction when it ended at or past it.
+   */
+  private turnEnded(room: Room, turn: Turn): void {
+    const { record } = room;
+    void this.sendContext(record);
+    const kept = this.options.state.windows?.[record.key];
+    if (kept === undefined) return;
+    if (turn.peak > kept.window / 2) {
+      kept.longTurn = {
+        at: new Date().toISOString(),
+        peak: Math.round(turn.peak),
+        folds: Math.min(turn.folds, LONG_TURN_FOLDS_MAX),
+      };
+    }
+    const here = this.options.state.sessions[`${record.key}|${room.spaceId}`] === kept.session;
+    if (here && room.compact === undefined && !this.compacting.has(record.key) && this.keepsLimit() && pastLimit(kept)) {
+      this.log(`${record.name} is past its limit, ${kept.used} of ${kept.window} tokens: compacting`);
+      room.compact = { by: "itself" };
+    }
+    void this.sendWindow(record);
+  }
+
+  /**
+   * A person's Compact now (Chips ADR 0146): taken at once, with the copy saying so; run in the
+   * session the agent said it was in last, now, or once the turn going there ends.
+   */
+  async windowCompact(ask: WindowCompactFrame): Promise<AgentContextWindowCopy> {
+    await this.known;
+    const record = await this.recordOf(ask.agent_id);
+    if (record === undefined) throw new Refuse("This harness has no such agent.");
+    const copy = this.windowCopy(record);
+    const kept = this.options.state.windows?.[record.key];
+    if (copy === undefined || kept === undefined) throw new Refuse(`${record.name} hasn't said how full it is yet.`);
+    if (!copy.compacts) throw new Refuse(copy.why_not ?? "It doesn't compact from Chips.", copy);
+    if (this.compacting.has(record.key)) throw new Refuse("It is compacting already.", copy);
+    const place = this.placeOf(kept.session);
+    if (place === undefined) throw new Refuse("The conversation it was in isn't open here any more.", copy);
+    const room = this.roomOf(place.record, place.spaceId);
+    this.compacting.set(record.key, room.busy ? "queued" : "running");
+    room.compact = { by: "asked", changeId: ask.change_id };
+    this.log(`${record.name} compacts ${room.busy ? "when its turn ends" : "now"}, from Chips`);
+    // After the answer is on its way: what the compaction sends comes after it.
+    if (!room.busy) setImmediate(() => void this.pump(room));
+    return this.windowCopy(record) ?? copy;
+  }
+
+  /**
+   * A person's limit (Chips ADR 0146): kept with the agent. Claude Code's sessions start again with
+   * it before their next turn; for the others the bridge compacts past it after a turn. Picking the
+   * harness's own clears what a person picked.
+   */
+  async windowChange(ask: WindowChangeFrame): Promise<AgentContextWindowCopy> {
+    await this.known;
+    const record = await this.recordOf(ask.agent_id);
+    if (record === undefined) throw new Refuse("This harness has no such agent.");
+    const copy = this.windowCopy(record);
+    const kept = this.options.state.windows?.[record.key];
+    if (copy === undefined || kept === undefined) throw new Refuse(`${record.name} hasn't said how full it is yet.`);
+    if (!copy.editable || copy.limit === undefined) {
+      throw new Refuse(copy.why_read_only ?? "Its limit can't be changed from Chips.", copy);
+    }
+    const offered = ask.at === null ? copy.limit.may_turn_off : copy.limit.choices.includes(ask.at);
+    if (!offered) throw new Refuse("That limit isn't one it offers.", copy);
+    const before = kept.limit;
+    kept.limit = ask.at === copy.limit.default ? undefined : ask.at;
+    this.save();
+    if (this.knownKind === "claude-code" && kept.limit !== before) this.reload([record]);
+    this.log(`${record.name} compacts itself ${ask.at === null ? "only when asked" : `at ${ask.at}%`}, from Chips`);
+    return this.windowCopy(record) ?? copy;
+  }
+
+  /**
+   * Compact a room's session now: `/compact`, said to the agent as a turn of its own, whose words go
+   * nowhere. Done when the agent says it compacted; refused with its words when it doesn't.
+   */
+  private async compactIn(room: Room, ask: CompactAsk): Promise<void> {
+    const { record } = room;
+    const { kind, chips } = this.options;
+    this.compacting.set(record.key, "running");
+    void this.sendWindow(record);
+    const notDone = async (why: string) => {
+      this.compacting.delete(record.key);
+      this.log(`${record.name} not compacted: ${why}`);
+      if (ask.changeId === undefined || record.agentId === "") {
+        await this.sendWindow(record);
+        return;
+      }
+      await chips.settings
+        .contextWindowFailed(record.agentId, ask.changeId, why, this.windowCopy(record))
+        .catch((error: unknown) => this.log(`${record.name}'s context window not sent: ${messageOf(error)}`));
+    };
+    const client = await this.running();
+    if (client === undefined) return notDone(`${kind.name} isn't running.`);
+    let sessionId: string;
+    try {
+      sessionId = await this.sessionFor(record, client, room.spaceId);
+    } catch (error) {
+      return notDone(this.failure(record, error));
+    }
+    const run: CompactRun = { by: ask.by, words: "", done: false };
+    this.compactRuns.set(sessionId, run);
+    let failed: string | undefined;
+    try {
+      await client.prompt(sessionId, [{ type: "text", text: "/compact" }]);
+    } catch (error) {
+      failed = this.failure(record, error);
+    }
+    // Done, with no after-size said since: what the session last said is it.
+    const compaction = this.compactions.get(sessionId);
+    if (!run.done && compaction?.done === true && compaction.finished === undefined) {
+      compaction.to ??= this.sessionUsed.get(sessionId);
+      if (compaction.to !== undefined) this.compacted(sessionId, compaction);
+    }
+    this.compactRuns.delete(sessionId);
+    if (!run.done) return notDone(failed ?? (cut(run.words.trim(), 300) || `${kind.name} didn't compact.`));
+    this.compacting.delete(record.key);
+    await this.sendWindow(record);
+  }
+
   // ------------------------------------------------------------------ what the agent asks
 
   private async asked(request: AgentRequest): Promise<unknown> {
@@ -1134,6 +1731,26 @@ export class Bridge {
     }
     return { action: "accept", content };
   }
+}
+
+/**
+ * What a person changes about the harness's agents from their pages (Chips ADRs 0134, 0146), for
+ * `connect({ settings })`: their files, for Claude Code and Codex, whose files this bridge knows;
+ * and their context windows, for any kind. `bridge` is the one running, once it is.
+ */
+export function settingsFor(kind: KindConfig, bridge: () => Bridge | undefined): SettingsHandlers {
+  const active = (): Bridge => {
+    const running = bridge();
+    if (running === undefined) throw new Refuse("The harness is still starting.");
+    return running;
+  };
+  return {
+    ...(knownIdOf(kind) === undefined ? {} : { context: (edit: ContextEditFrame) => active().contextEdited(edit) }),
+    contextWindows: {
+      compact: (ask) => active().windowCompact(ask),
+      change: (ask) => active().windowChange(ask),
+    },
+  };
 }
 
 // ------------------------------------------------------------------ small words

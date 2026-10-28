@@ -20,8 +20,9 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { processWire } from "./acp.js";
-import { Bridge, type BridgeState, type KindConfig } from "./bridge.js";
+import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { adapterEnv, knownIdOf } from "./kinds.js";
 import { checkCommand, checkSignIn, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
@@ -42,7 +43,7 @@ try {
     log(`checking that ${kind.name} starts and is signed in`);
     const cwd = kind.folder ?? kind.folders;
     const stderr: string[] = [];
-    const wire = processWire(kind.command, cwd, { ...process.env, ...kind.env }, (line) => stderr.push(line));
+    const wire = processWire(kind.command, cwd, adapterEnv(kind, { ...process.env, ...kind.env }), (line) => stderr.push(line));
     await checkSignIn(kind, wire, cwd, { stderr: () => stderr });
     reportStep("checked", { detail: `${kind.name} opened a session` });
   }
@@ -69,7 +70,16 @@ const joined = await joinChips({
   url: process.env["CHIPS_URL"],
   name: kind.name,
   software: "chips-acp 1.0.0",
-  wants: ["agents", "new_spaces", "new_agents", "forks", "restarts"],
+  wants: [
+    "agents",
+    "new_spaces",
+    "new_agents",
+    "forks",
+    "restarts",
+    // Each agent's files, for the kinds whose files the bridge knows, and every agent's context window.
+    ...(knownIdOf(kind) === undefined ? [] : ["context_files"]),
+    "context_windows",
+  ],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello. What signs its
@@ -77,7 +87,9 @@ const joined = await joinChips({
 keepIfAsked(LABEL, joined.url, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], log);
 
 const kept = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as Partial<BridgeState>) : {};
-const state: BridgeState = { sessions: kept.sessions ?? {}, agents: kept.agents ?? {} };
+const state: BridgeState = { sessions: kept.sessions ?? {}, agents: kept.agents ?? {}, windows: kept.windows ?? {} };
+// The agent's environment: this process's, the config's, and for Codex the room to read a whole AGENTS.md.
+const env = adapterEnv(kind, { ...process.env, ...kind.env });
 
 let bridge: Bridge | undefined;
 const chips = await connect({
@@ -89,6 +101,8 @@ const chips = await connect({
     log("a person asked for a restart");
     await bridge?.restart();
   },
+  // An agent's files and its context window, changed from its page (Chips ADRs 0134, 0146).
+  settings: settingsFor(kind, () => bridge),
 });
 
 // Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.
@@ -101,10 +115,8 @@ bridge = new Bridge({
   projects: git.ok,
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
-  wire: () =>
-    processWire(kind.command, kind.folder ?? kind.folders, { ...process.env, ...kind.env }, (line) =>
-      log(`${kind.name}: ${line}`),
-    ),
+  wire: () => processWire(kind.command, kind.folder ?? kind.folders, env, (line) => log(`${kind.name}: ${line}`)),
+  env,
   log,
 });
 await bridge.start();

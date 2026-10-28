@@ -57,6 +57,53 @@ const knownBy = (kind: KindConfig) => {
   return KNOWN.find((each) => each.program === program);
 };
 
+/** Which of the kinds this bridge knows by name a config runs, by its command: `claude-code`, `codex`. */
+export type KnownId = "claude-code" | "codex";
+
+export function knownIdOf(kind: KindConfig): KnownId | undefined {
+  return knownBy(kind)?.id as KnownId | undefined;
+}
+
+/**
+ * How much of an agent's `AGENTS.md` Codex reads (`project_doc_max_bytes`): 32 KiB unless its
+ * config says, which is less than the 64 KB Chips lets a person write. The bridge's own Codex adapter
+ * is given 64 KiB in `CODEX_CONFIG` (`adapterEnv`), which codex-acp lays over Codex's own config for
+ * each session it starts, so a file saved from Chips is read whole.
+ */
+export const CODEX_DOC_BYTES = 65_536;
+
+/** The `CODEX_CONFIG` an environment carries, read as codex-acp reads it: JSON, or nothing. */
+function codexConfigOf(env: NodeJS.ProcessEnv): Record<string, unknown> | undefined {
+  const raw = env["CODEX_CONFIG"];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The environment the kind's adapter runs in: `env` as it is, and for Codex, `CODEX_CONFIG` with
+ * `project_doc_max_bytes` at 64 KiB where it doesn't say already. A `CODEX_CONFIG` that isn't JSON
+ * is left as it is: codex-acp would refuse it, and that is the person's to see.
+ */
+export function adapterEnv(kind: KindConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (knownIdOf(kind) !== "codex") return env;
+  const raw = env["CODEX_CONFIG"];
+  const config = codexConfigOf(env);
+  if (raw !== undefined && raw.trim() !== "" && config === undefined) return env;
+  if (config?.["project_doc_max_bytes"] !== undefined) return env;
+  return { ...env, CODEX_CONFIG: JSON.stringify({ ...config, project_doc_max_bytes: CODEX_DOC_BYTES }) };
+}
+
+/** How many bytes of an agent's `AGENTS.md` its Codex reads, in the environment it runs in. */
+export function codexDocBytes(env: NodeJS.ProcessEnv): number {
+  const said = codexConfigOf(env)?.["project_doc_max_bytes"];
+  return typeof said === "number" && Number.isFinite(said) && said > 0 ? said : 32_768;
+}
+
 /** How to install a kind's adapter, where it is one this bridge knows. */
 export function installWords(kind: KindConfig): string {
   const known = knownBy(kind);

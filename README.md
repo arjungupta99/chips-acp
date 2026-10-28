@@ -158,10 +158,30 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 The agent is offered no file system and no terminal: it works with its own tools, under its own
 permissions, and each permission it asks for is an approval card.
 
+### What Chips shows on an agent's page
+
+The bridge says `context` (Claude Code and Codex) and `context_windows` (every kind) in its hello,
+and sends each agent's copies when it starts and as they change. Chips draws them where the
+harness is granted `context_files` and `context_windows`.
+
+| Chips | Claude Code | Codex | Another kind |
+|---|---|---|---|
+| Context: its own files | its folder's `CLAUDE.md`, and `CLAUDE.local.md`, `.claude/CLAUDE.md` and `.claude/rules/*.md` where they are; its memory, `~/.claude/projects/<its folder>/memory/MEMORY.md`, which Claude Code writes too. A person may change each, and one not there yet shows empty | its folder's `AGENTS.override.md`, else its `AGENTS.md`; a person may change it | none |
+| Context: shared | `~/chips-acp/claude-code/CLAUDE.md`, read by every agent, changed on the harness's page; files above the agents' folders and `~/.claude/CLAUDE.md`, shown and not changed, since they aren't only these agents' | `~/.codex/AGENTS.override.md`, else `~/.codex/AGENTS.md`, shown and not changed | none |
+| When it reads them | when a session starts; an edit closes the agent's sessions before its next turn and loads them again, so it applies from the next message | the same | |
+| Context window | `usage_update` of the agent's session that said last; the window from the update that ends a turn (it carries the cost), as one before may be a default | `usage_update` | `usage_update` |
+| Compact now | `/compact` said to that session as a turn of its own, after any turn going there; its words go nowhere; from and to from its tool call's `rawOutput` | the same; to from the `usage_update` it sends as it finishes | where it lists `compact` among its commands |
+| Its limit | its own from `autoCompactWindow` in its settings (`modelSettings` per model), about 33,000 tokens short of it; a pick from Chips goes in each session's `_meta.claudeCode.options.settings`, never in a file; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` beats both, and the limit can't be changed then | the bridge's: after a turn that ends at or past it, the bridge compacts that session; off unless picked | as Codex, where it has `compact` |
+
+An edit is saved only if the file is still what the person read; otherwise it is refused as changed.
+The bridge's own Codex adapter runs with `project_doc_max_bytes` at 64 KiB in `CODEX_CONFIG`, laid
+over Codex's own config for each session it starts, so Codex reads all of a file Chips lets a person
+write (32 KiB unless set).
+
 ## Not built yet
 
 From the plan's Phase 4: agents over WebSocket (`goose serve`); `follows_rooms`; models and effort
-from `configOptions`; context files; the bridge's own MCP server (reminders, ask a person) and heartbeats; sub-agents as lanes; free-text form fields; approval scopes limited to the
+from `configOptions`; the bridge's own MCP server (reminders, ask a person) and heartbeats; sub-agents as lanes; free-text form fields; approval scopes limited to the
 agent's options (a wire change, Phase 6).
 
 ## Tests
@@ -174,7 +194,9 @@ A scripted ACP agent (`test/fake-agent.ts`), in process and as a child process, 
 conformance kit's fake Chips, which checks every event against the protocol's schemas; and the kit's
 golden scenario with the +, Add and Fork, which
 `chips conformance custom --capabilities agents,new_spaces,new_agents,forks,restarts` runs live:
-Lives in Chips 5 of 6.
+Lives in Chips 5 of 6. Run as Claude Code with `context_files` and `context_windows` besides, the
+kit's settings checks pass: Managed from Chips 2 of 5. `test/settings.test.ts` plays the files and
+the windows of each kind, from a home of its own.
 
 ```bash
 npm run e2e

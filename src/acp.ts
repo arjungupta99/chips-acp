@@ -167,12 +167,16 @@ export class AcpClient {
     };
   }
 
-  /** A new session in `cwd`. Answers with its id and anything it said it can be set to. */
+  /**
+   * A new session in `cwd`. Answers with its id and anything it said it can be set to. `meta` is
+   * the agent's own `_meta`: Claude Code's takes its settings there (`claudeCode.options.settings`).
+   */
   async newSession(
     cwd: string,
     mcpServers: readonly unknown[] = [],
+    meta?: Readonly<Record<string, unknown>>,
   ): Promise<{ sessionId: string; configOptions: readonly ConfigOption[] }> {
-    const answer = (await this.call("session/new", { cwd, mcpServers })) as Record<string, unknown>;
+    const answer = (await this.call("session/new", { cwd, mcpServers, ...metaOf(meta) })) as Record<string, unknown>;
     return { sessionId: String(answer["sessionId"]), configOptions: configOptionsOf(answer) };
   }
 
@@ -181,8 +185,9 @@ export class AcpClient {
     sessionId: string,
     cwd: string,
     mcpServers: readonly unknown[] = [],
+    meta?: Readonly<Record<string, unknown>>,
   ): Promise<{ configOptions: readonly ConfigOption[] }> {
-    const answer = (await this.call("session/load", { sessionId, cwd, mcpServers })) as
+    const answer = (await this.call("session/load", { sessionId, cwd, mcpServers, ...metaOf(meta) })) as
       | Record<string, unknown>
       | null
       | undefined;
@@ -190,8 +195,16 @@ export class AcpClient {
   }
 
   /** A copy of a session, remembering everything it does, working in `cwd`. Answers with the copy's id. */
-  async forkSession(sessionId: string, cwd: string, mcpServers: readonly unknown[] = []): Promise<string> {
-    const answer = (await this.call("session/fork", { sessionId, cwd, mcpServers })) as Record<string, unknown>;
+  async forkSession(
+    sessionId: string,
+    cwd: string,
+    mcpServers: readonly unknown[] = [],
+    meta?: Readonly<Record<string, unknown>>,
+  ): Promise<string> {
+    const answer = (await this.call("session/fork", { sessionId, cwd, mcpServers, ...metaOf(meta) })) as Record<
+      string,
+      unknown
+    >;
     if (typeof answer["sessionId"] !== "string") throw new AcpError("the agent copied the session and named no copy", -32000);
     return answer["sessionId"];
   }
@@ -341,6 +354,11 @@ function configOptionsOf(answer: Readonly<Record<string, unknown>>): ConfigOptio
       },
     ];
   });
+}
+
+/** A call's `_meta`, where there is one. */
+function metaOf(meta: Readonly<Record<string, unknown>> | undefined): { _meta?: Readonly<Record<string, unknown>> } {
+  return meta === undefined ? {} : { _meta: meta };
 }
 
 /** The JSON-RPC answer for a method this client does not offer. */

@@ -11,6 +11,15 @@
  * - `refuse`: it stops with `refusal`;
  * - `die`: its process goes away mid-turn.
  * - `narrate`: it says what it will do, reads a file, and then answers.
+ * - `pause`: it answers as anything else does, a moment later;
+ * - `big`: it answers holding 150,000 tokens of its 200,000;
+ * - `early`: it answers saying how full it is, with no result after (Claude Code's guess at its window);
+ * - `fold`: it fills to 150,000, compacts itself to 30,000, and answers.
+ *
+ * With `compaction`, a prompt of `/compact` alone compacts the session to a quarter of what it held,
+ * as Claude Code says it (`claude`: a tool call with `rawOutput`, then how full) or as Codex does
+ * (`codex`: how full, then the tool call done); without, it says it doesn't know the command.
+ * `model` is said with each reading, as Claude Code does; `commands` are the commands it offers.
  *
  * With `auth`, it says who it is signed in as after `initialize`: `out` is nobody, and it refuses
  * every turn, as Claude Code does signed out; with `refusesSessions` it refuses each session too, as
@@ -40,6 +49,8 @@ export interface FakeAgent {
   /** `<session>><copy>` for each session it copied. */
   readonly forks: string[];
   readonly closed: string[];
+  /** The `_meta` of each session made, loaded or copied, as `<method> <session>` and the meta. */
+  readonly metas: { readonly call: string; readonly meta: unknown }[];
   /** How many times it was started. */
   starts: number;
 }
@@ -52,9 +63,13 @@ export function fakeAgent(
     close?: boolean;
     auth?: "in" | "out";
     refusesSessions?: boolean;
+    compaction?: "claude" | "codex";
+    model?: string;
+    commands?: readonly string[];
   } = {},
 ): FakeAgent {
   const agent: FakeAgent = {
+    metas: [],
     prompts: [],
     made: [],
     loaded: [],
@@ -77,6 +92,32 @@ export function fakeAgent(
       };
       const update = (sessionId: string, body: Message) =>
         send({ method: "session/update", params: { sessionId, update: body } });
+      /** What each session holds, as it last said. */
+      const held = new Map<string, number>();
+      const usage = (sessionId: string, used: number, cost?: number) => {
+        held.set(sessionId, used);
+        update(sessionId, {
+          sessionUpdate: "usage_update",
+          used,
+          size: 200_000,
+          ...(cost === undefined ? {} : { cost: { amount: cost, currency: "USD" } }),
+          ...(options.model === undefined ? {} : { _meta: { "_claude/model": options.model } }),
+        });
+      };
+      const compactCall = (sessionId: string, id: string, trigger: "manual" | "automatic", from: number, to: number) => {
+        const meta = { claudeCode: { toolName: "compact" } };
+        update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: "Compact conversation", kind: "think", status: "in_progress", _meta: meta });
+        if (options.compaction === "codex") usage(sessionId, to);
+        update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: id, status: "completed", _meta: meta });
+        if (options.compaction === "codex") return;
+        update(sessionId, {
+          sessionUpdate: "tool_call_update",
+          toolCallId: id,
+          rawOutput: { trigger, preTokens: from, postTokens: to },
+          _meta: meta,
+        });
+        usage(sessionId, to);
+      };
       const ask = (method: string, params: Message) =>
         new Promise<Message>((resolve) => {
           asked += 1;
@@ -100,6 +141,41 @@ export function fakeAgent(
         const reply = (stopReason: string) => send({ id, result: { stopReason } });
         const say = (words: string) =>
           update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: words } });
+        if (text === "/compact") {
+          if (options.compaction === undefined) say("Unknown command: /compact");
+          else {
+            const from = held.get(sessionId) ?? 1200;
+            compactCall(sessionId, `compact-${agent.prompts.length}`, "manual", from, Math.round(from / 4));
+            say("Compacted. ctrl+o to see the summary");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          reply("end_turn");
+          return;
+        }
+        if (last === "early") {
+          usage(sessionId, 5000);
+          say("Early.");
+          reply("end_turn");
+          return;
+        }
+        if (last === "big") {
+          say("Big answer.");
+          usage(sessionId, 150_000, 0.5);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          reply("end_turn");
+          return;
+        }
+        if (last === "fold") {
+          usage(sessionId, 150_000);
+          compactCall(sessionId, "compact-auto", "automatic", 150_000, 30_000);
+          if (options.compaction === "codex") say("*Context compacted to fit the model's context window.*\n\n");
+          say("Here is the answer.");
+          usage(sessionId, 32_000, 0.4);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          reply("end_turn");
+          return;
+        }
+        if (last === "pause") await new Promise((resolve) => setTimeout(resolve, 300));
         if (last === "slow") {
           while (!cancelled.has(sessionId) && !gone) await new Promise((resolve) => setTimeout(resolve, 10));
           cancelled.delete(sessionId);
@@ -190,12 +266,7 @@ export function fakeAgent(
         update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" });
         say("Here is ");
         say("the answer.");
-        update(sessionId, {
-          sessionUpdate: "usage_update",
-          used: 1200,
-          size: 200_000,
-          cost: { amount: 0.02, currency: "USD" },
-        });
+        usage(sessionId, last === "pause" ? 1300 : 1200, 0.02);
         await new Promise((resolve) => setTimeout(resolve, 20));
         reply("end_turn");
       };
@@ -240,12 +311,20 @@ export function fakeAgent(
             const sessionId = `sess-${agent.made.length + agent.loaded.length + 1}-${agent.starts}`;
             agent.made.push(sessionId);
             agent.cwds.set(sessionId, String(params["cwd"]));
+            agent.metas.push({ call: `new ${sessionId}`, meta: params["_meta"] });
             send({ id, result: { sessionId } });
+            if (options.commands !== undefined) {
+              update(sessionId, {
+                sessionUpdate: "available_commands_update",
+                availableCommands: options.commands.map((name) => ({ name, description: name, input: null })),
+              });
+            }
             return;
           }
           case "session/load":
             agent.loaded.push(String(params["sessionId"]));
             agent.cwds.set(String(params["sessionId"]), String(params["cwd"]));
+            agent.metas.push({ call: `load ${String(params["sessionId"])}`, meta: params["_meta"] });
             send({ id, result: null });
             return;
           case "session/fork": {
