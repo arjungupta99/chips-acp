@@ -19,9 +19,10 @@
  * who said it, in that room, looking at it again.
  *
  * Each agent's page shows its context window, kept by the bridge from what the agent says
- * (`windows.ts`), and for Claude Code and Codex the files the agent is built from (`context.ts`).
- * A person's Compact now is `/compact` said to the agent's session as a turn of its own; a person's
- * edit of a file starts that agent's sessions again before its next turn, so it reads what changed.
+ * (`windows.ts`), and for Claude Code and Codex the files the agent is built from (`context.ts`)
+ * and the model it runs on (`models.ts`). A person's Compact now is `/compact` said to the agent's
+ * session as a turn of its own; a person's edit of a file starts that agent's sessions again before
+ * its next turn, so it reads what changed; a person's pick of its model is set on its sessions.
  */
 
 import { randomBytes } from "node:crypto";
@@ -33,6 +34,7 @@ import type {
   Agent,
   AgentContextCopy,
   AgentContextWindowCopy,
+  AgentModelCopy,
   Chips,
   Decision,
   HarnessContextCopy,
@@ -52,6 +54,7 @@ import {
   type LastCompaction,
   LONG_TURN_FOLDS_MAX,
   type MessageNew,
+  type ModelChangeFrame,
   type ProjectFacts,
   type RiskClass,
   type StepKind,
@@ -64,6 +67,8 @@ import {
   type AgentInfo,
   type AgentRequest,
   type AuthStatus,
+  type ConfigOption,
+  configOptionsOf,
   isAuthRequired,
   notOffered,
   type SessionUpdate,
@@ -72,6 +77,18 @@ import {
 import { settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
+import {
+  type Catalog,
+  effortOption,
+  lookAt,
+  modelCopy,
+  modelOption,
+  type ModelPick,
+  offers,
+  pickFrom,
+  pickIn,
+  SETTINGS_LEVEL,
+} from "./models.js";
 import {
   bridgeLimit,
   CODEX_COMPACTED,
@@ -119,6 +136,8 @@ export interface AgentRecord {
   readonly forkedFrom?: string | undefined;
   /** What it was made for — an `agent.asked`, an `agent.fork`, a room from the + — so an ask heard twice makes one. */
   readonly answers?: string | undefined;
+  /** The model and effort a person picked for it in Chips (Chips ADR 0241); none, and it runs on the default. */
+  model?: ModelPick | undefined;
 }
 
 /** What the bridge keeps across restarts beside the SDK's own store. */
@@ -129,6 +148,8 @@ export interface BridgeState {
   agents: Record<string, AgentRecord>;
   /** Each agent's context window as it last said, by key (Chips ADR 0146): sent again after a restart. */
   windows?: Record<string, KeptWindow>;
+  /** What the agent offers to run on, as it said when the bridge last looked (Chips ADR 0241). */
+  models?: Catalog;
 }
 
 export interface BridgeOptions {
@@ -145,6 +166,12 @@ export interface BridgeOptions {
    * person's work there as they always have.
    */
   readonly projects?: boolean | undefined;
+  /**
+   * Whether each agent's model is shown in Chips and picked there (Chips ADR 0241): true for Claude
+   * Code and Codex, whose adapters offer their models as session options. The bridge looks at what
+   * the agent offers each time it starts it.
+   */
+  readonly models?: boolean | undefined;
   /** How long to wait before running the agent again after it stopped. */
   readonly respawnMs?: number | undefined;
   /** How long a session may be quiet before it is closed: half an hour unless said. */
@@ -305,6 +332,8 @@ export class Bridge {
   private readonly compacting = new Map<string, "queued" | "running">();
   /** A window copy to send in a moment, by agent key: readings come in bursts. */
   private readonly windowTimers = new Map<string, NodeJS.Timeout>();
+  /** Each live session's options as the agent last said them: its model and effort among them. */
+  private readonly sessionOptions = new Map<string, readonly ConfigOption[]>();
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -334,9 +363,10 @@ export class Bridge {
     chips.onSpaceAsked((asked) => after("a room from the +", () => this.claim(asked)));
     await this.know(await chips.agents.list(), { forget: true });
     this.knew();
-    // What each agent is built from, and how full it last said it was (Chips ADRs 0134, 0146).
+    // What each agent is built from, how full it last said it was, and what it runs on (Chips ADRs 0134, 0146, 0241).
     await this.sendContexts();
     for (const record of this.records()) await this.sendWindow(record);
+    await this.sendModels();
     await this.run();
     const idleMs = this.options.idleMs ?? IDLE_MS;
     this.sweeper = setInterval(() => void this.sweep(idleMs), Math.max(10, Math.min(60_000, idleMs / 2)));
@@ -405,12 +435,13 @@ export class Bridge {
           name: agent.name,
           folder: original?.folder ?? (await this.folderFor(agent.name)),
           ...(forkedFrom === undefined ? {} : { forkedFrom }),
+          ...(original?.model === undefined ? {} : { model: original.model }),
         };
         changed = true;
       }
       if (changed) {
         this.save();
-        this.contextsChanged();
+        this.agentsChanged();
       }
     });
     if (!forget) return;
@@ -422,7 +453,7 @@ export class Bridge {
   /** A record for an agent Chips is about to be asked to register: a new key, and its folder. */
   private made(
     name: string,
-    more: { readonly answers: string; readonly folder?: string; readonly forkedFrom?: string },
+    more: { readonly answers: string; readonly folder?: string; readonly forkedFrom?: string; readonly model?: ModelPick | undefined },
   ): Promise<AgentRecord> {
     return this.one(async () => {
       const kept = this.records().find((record) => record.answers === more.answers);
@@ -434,6 +465,7 @@ export class Bridge {
         folder: more.folder ?? (await this.folderFor(name)),
         answers: more.answers,
         ...(more.forkedFrom === undefined ? {} : { forkedFrom: more.forkedFrom }),
+        ...(more.model === undefined ? {} : { model: more.model }),
       };
       this.options.state.agents[record.key] = record;
       this.save();
@@ -475,7 +507,7 @@ export class Bridge {
     record.agentId = agent.agentId;
     record.name = agent.name;
     this.save();
-    this.contextsChanged();
+    this.agentsChanged();
   }
 
   /**
@@ -506,7 +538,8 @@ export class Bridge {
    * A person asked for a copy of an agent in a room (ADR 0087, Fork): the agent's session in the
    * room it is in, copied with `session/fork` in the same folder, is the copy's session in the room
    * asked; the copy is registered for it. One that never spoke there is copied as a new agent in
-   * the same folder. A session that won't copy makes no copy: Chips tells the person.
+   * the same folder. A session that won't copy makes no copy: Chips tells the person. The copy
+   * starts with its original's pick of a model.
    */
   private async copy(fork: AgentFork): Promise<void> {
     const { chips, state } = this.options;
@@ -517,25 +550,29 @@ export class Bridge {
     let record = this.records().find((each) => each.answers === fork.id);
     if (record === undefined) {
       const from = await this.sessionOf(original);
-      let copied: string | undefined;
+      let copied: { client: AcpClient; sessionId: string } | undefined;
       if (from !== undefined) {
         const client = await this.running();
         if (client === undefined || this.process.info?.forkSession !== true) {
           this.log(`${original.name} can't be copied: ${client === undefined ? "the agent isn't running" : "the agent doesn't copy sessions"}`);
           return;
         }
-        copied = await client.forkSession(from, original.folder);
-        this.process.live.add(copied);
-        await this.moded(client, copied);
+        const forked = await client.forkSession(from, original.folder);
+        copied = { client, sessionId: forked.sessionId };
+        this.process.live.add(forked.sessionId);
+        this.sessionOptions.set(forked.sessionId, forked.configOptions);
+        await this.moded(client, forked.sessionId);
       }
       record = await this.made(forkName(original.name), {
         answers: fork.id,
         folder: original.folder,
         forkedFrom: original.agentId,
+        model: original.model,
       });
       if (copied !== undefined) {
-        state.sessions[`${record.key}|${spaceId}`] = copied;
+        state.sessions[`${record.key}|${spaceId}`] = copied.sessionId;
         this.save();
+        await this.modelled(copied.client, record, copied.sessionId);
       }
     }
     const agent = await chips.agents.register({
@@ -583,7 +620,7 @@ export class Bridge {
         };
         this.options.state.agents[key] = made;
         this.save();
-        this.contextsChanged();
+        this.agentsChanged();
         return made;
       }));
     this.log(`${agent.name} claimed ${spaceId}, in ${record.folder}`);
@@ -646,12 +683,13 @@ export class Bridge {
     for (const [id, sessionId] of Object.entries(state.sessions)) {
       if (!id.startsWith(`${key}|`)) continue;
       delete state.sessions[id];
+      this.sessionOptions.delete(sessionId);
       if (this.process.live.delete(sessionId) && this.process.info?.closeSession === true) {
         await this.process.client?.closeSession(sessionId).catch(() => undefined);
       }
     }
     this.save();
-    this.contextsChanged();
+    this.agentsChanged();
     this.log(`${record.name} deleted; its folder stays, ${record.folder}`);
   }
 
@@ -663,6 +701,7 @@ export class Bridge {
     proc.live.clear();
     proc.stale.clear();
     proc.info = undefined;
+    this.sessionOptions.clear();
     let wire: Wire;
     try {
       wire = this.options.wire();
@@ -681,6 +720,8 @@ export class Bridge {
       proc.info = await client.initialize({ name: "chips-acp", version: VERSION });
       proc.failures = 0;
       this.log(`${name} is running${proc.info.name === undefined ? "" : ` (${proc.info.name})`}`);
+      // What it offers to run on, each time it starts: an update may have changed it (Chips ADR 0241).
+      if (this.options.models === true) void this.look(client);
     } catch (error) {
       this.log(`${name} didn't say hello: ${String(error)}`);
       client.close();
@@ -765,6 +806,7 @@ export class Bridge {
         await client.closeSession(sessionId);
         live.delete(sessionId);
         this.process.stale.delete(sessionId);
+        this.sessionOptions.delete(sessionId);
         this.log(`${room.record.name}'s session in ${room.spaceId} closed, quiet ${Math.round(idleMs / 60_000)} min`);
       } catch (error) {
         this.log(`${room.record.name}'s session in ${room.spaceId} stays open: ${messageOf(error)}`);
@@ -949,8 +991,9 @@ export class Bridge {
   }
 
   /**
-   * The room's session: the one it had, loaded once, or a new one, in the agent's folder. One a
-   * change from Chips made stale is closed and loaded again first, so the agent reads what changed.
+   * The room's session: the one it had, loaded once, or a new one, in the agent's folder, put on
+   * the agent's model. One a change from Chips made stale is closed and loaded again first, so the
+   * agent reads what changed.
    */
   private async sessionFor(record: AgentRecord, client: AcpClient, spaceId: string): Promise<string> {
     const { state } = this.options;
@@ -961,9 +1004,11 @@ export class Bridge {
     if (kept !== undefined && live.has(kept)) return kept;
     if (kept !== undefined && info?.loadSession === true) {
       try {
-        await client.loadSession(kept, record.folder, [], this.sessionMeta(record));
+        const loaded = await client.loadSession(kept, record.folder, [], this.sessionMeta(record));
         live.add(kept);
+        this.sessionOptions.set(kept, loaded.configOptions);
         await this.moded(client, kept);
+        await this.modelled(client, record, kept);
         return kept;
       } catch (error) {
         this.log(`${record.name} couldn't load ${kept}: ${messageOf(error)}; starting afresh`);
@@ -971,7 +1016,9 @@ export class Bridge {
     }
     const made = await client.newSession(record.folder, [], this.sessionMeta(record));
     live.add(made.sessionId);
+    this.sessionOptions.set(made.sessionId, made.configOptions);
     await this.moded(client, made.sessionId);
+    await this.modelled(client, record, made.sessionId);
     state.sessions[key] = made.sessionId;
     this.save();
     return made.sessionId;
@@ -988,6 +1035,7 @@ export class Bridge {
     try {
       await client.closeSession(sessionId);
       live.delete(sessionId);
+      this.sessionOptions.delete(sessionId);
       this.log(`${record.name}'s session ${sessionId} closed, to start again with what changed`);
     } catch (error) {
       this.log(`${record.name}'s session ${sessionId} stays open: ${messageOf(error)}`);
@@ -1256,8 +1304,9 @@ export class Bridge {
   }
 
   /** The agents came or went: the copies sent again where they changed (Chips takes the same copy once). */
-  private contextsChanged(): void {
+  private agentsChanged(): void {
     if (this.files !== undefined) void this.sendContexts();
+    void this.sendModels();
   }
 
   /** The harness's own set and each agent's files, as they are on disk now. */
@@ -1398,6 +1447,12 @@ export class Bridge {
         const run = this.compactRuns.get(sessionId);
         if (run !== undefined) run.words += text;
         if (text.trim() === CODEX_COMPACTED) this.saidCompacted(sessionId);
+        return;
+      }
+      case "config_option_update": {
+        // The agent moved a session itself: Claude Code, off a model that refused a turn.
+        const options = configOptionsOf(update);
+        if (this.sessionOptions.has(sessionId) && options.length > 0) this.sessionOptions.set(sessionId, options);
         return;
       }
       case "available_commands_update": {
@@ -1661,6 +1716,137 @@ export class Bridge {
     await this.sendWindow(record);
   }
 
+  // ------------------------------------------------------------------ what each agent runs on (Chips ADRs 0140, 0241)
+
+  /**
+   * What the agent offers to run on, looked at each time it starts (`models.ts`): a session opened
+   * in the harness's folder, put on each of its models in turn for that model's levels, and let go,
+   * with nothing said to it. Kept with the bridge's agents, and each agent's copy sent from it.
+   */
+  private async look(client: AcpClient): Promise<void> {
+    const { kind } = this.options;
+    let sessionId: string | undefined;
+    try {
+      const made = await client.newSession(kind.folder ?? kind.folders);
+      sessionId = made.sessionId;
+      const { catalog, refused } = await lookAt(made.configOptions, (configId, value) =>
+        client.setConfigOption(made.sessionId, configId, value),
+      );
+      for (const each of refused) this.log(`${kind.name} won't be put on ${each.model}, so it isn't offered: ${each.why}`);
+      if (catalog === undefined) {
+        this.log(`${kind.name} offers no model to pick`);
+        return;
+      }
+      this.options.state.models = catalog;
+      this.save();
+      this.log(`${kind.name} offers ${catalog.choices.map((choice) => choice.id).join(", ")}; a new session runs on ${catalog.default.model}`);
+      await this.sendModels();
+    } catch (error) {
+      this.log(`${kind.name}'s models not looked at: ${messageOf(error)}`);
+    } finally {
+      if (sessionId !== undefined && this.process.info?.closeSession === true) {
+        await client.closeSession(sessionId).catch(() => undefined);
+      }
+    }
+  }
+
+  /** Each agent's copy, from what the agent offered when the bridge last looked: none before it has. */
+  private async sendModels(): Promise<void> {
+    for (const record of this.records()) await this.sendModel(record);
+  }
+
+  private async sendModel(record: AgentRecord): Promise<void> {
+    const catalog = this.options.state.models;
+    if (this.options.models !== true || catalog === undefined || record.agentId === "") return;
+    await this.options.chips.settings
+      .model(record.agentId, modelCopy(catalog, record.model, this.options.kind.name))
+      .catch((error: unknown) => this.log(`${record.name}'s model not sent: ${messageOf(error)}`));
+  }
+
+  /** A session just opened, put on its agent's model; where the agent won't, left as it is, and said so. */
+  private async modelled(client: AcpClient, record: AgentRecord, sessionId: string): Promise<void> {
+    await this.putOnModel(client, record, sessionId).catch((error: unknown) =>
+      this.log(`${record.name}'s session ${sessionId} stays on what ${this.options.kind.name} opened it on: ${messageOf(error)}`),
+    );
+  }
+
+  /**
+   * A session on its agent's model and effort: its pick, else the default. The model is set where
+   * the session is on another, and a picked level always, so the agent's settings don't move it.
+   * With no pick the level is left as the agent puts it, unless the pick was just dropped (`back`):
+   * then it goes back too, to Claude Code's own `default`, or else the default's. Throws the agent's
+   * refusal.
+   */
+  private async putOnModel(client: AcpClient, record: AgentRecord, sessionId: string, back = false): Promise<void> {
+    const catalog = this.options.state.models;
+    let now = this.sessionOptions.get(sessionId);
+    if (this.options.models !== true || catalog === undefined || now === undefined) return;
+    const pick = pickIn(catalog, record.model);
+    const target = pick ?? catalog.default;
+    const set = async (option: ConfigOption, value: string) => {
+      const answered = await client.setConfigOption(sessionId, option.id, value);
+      const before = now ?? [];
+      now = answered.length > 0 ? answered : before.map((each) => (each.id === option.id ? { ...each, currentValue: value } : each));
+      this.sessionOptions.set(sessionId, now);
+    };
+    const model = modelOption(now);
+    if (model !== undefined && model.currentValue !== target.model) await set(model, target.model);
+    const effort = effortOption(now);
+    const level =
+      pick !== undefined ? pick.effort : back ? (offers(effort, SETTINGS_LEVEL) ? SETTINGS_LEVEL : target.effort) : undefined;
+    if (effort !== undefined && level !== undefined && offers(effort, level)) await set(effort, level);
+  }
+
+  /**
+   * Each of an agent's live sessions on its model now. Put back on the default (`back`), a session
+   * the agent won't move (Codex, off a model it doesn't list) is let go before its next turn and
+   * loaded again; any other refusal is thrown.
+   */
+  private async putSessionsOnModel(record: AgentRecord, back: boolean): Promise<void> {
+    const client = this.process.client;
+    if (client === undefined || client.gone) return;
+    for (const [id, sessionId] of Object.entries(this.options.state.sessions)) {
+      if (!id.startsWith(`${record.key}|`) || !this.process.live.has(sessionId)) continue;
+      try {
+        await this.putOnModel(client, record, sessionId, back);
+      } catch (error) {
+        if (!back) throw error;
+        this.process.stale.add(sessionId);
+        this.log(`${record.name}'s session ${sessionId} starts again before its next turn: ${messageOf(error)}`);
+      }
+    }
+  }
+
+  /**
+   * A person's pick of an agent's model and effort from Chips (Chips ADR 0241), or `null` for the
+   * default: kept with the agent and set on each of its live sessions now, and on each it opens
+   * after. One the agent refuses is refused with its words, and the sessions go back to what they
+   * were on. A pick applies to that agent only.
+   */
+  async modelChange(change: ModelChangeFrame): Promise<AgentModelCopy> {
+    await this.known;
+    const { kind } = this.options;
+    const catalog = this.options.state.models;
+    if (this.options.models !== true || catalog === undefined) throw new Refuse(`${kind.name} hasn't said what it runs on yet.`);
+    const record = await this.recordOf(change.agent_id);
+    if (record === undefined) throw new Refuse("This harness has no such agent.");
+    const pick = pickFrom(catalog, change);
+    if (pick === undefined) throw new Refuse(`${kind.name} doesn't offer that.`, modelCopy(catalog, record.model, kind.name));
+    const before = record.model;
+    record.model = pick ?? undefined;
+    try {
+      await this.putSessionsOnModel(record, pick === null);
+    } catch (error) {
+      record.model = before;
+      await this.putSessionsOnModel(record, before === undefined).catch(() => undefined);
+      throw new Refuse(`${kind.name} refused: ${messageOf(error)}`, modelCopy(catalog, before, kind.name));
+    }
+    this.save();
+    const now = pick === null ? `${kind.name}'s default` : `${pick.model}${pick.effort === undefined ? "" : ` at ${pick.effort}`}`;
+    this.log(`${record.name} runs on ${now}, from Chips`);
+    return modelCopy(catalog, record.model, kind.name);
+  }
+
   // ------------------------------------------------------------------ what the agent asks
 
   private async asked(request: AgentRequest): Promise<unknown> {
@@ -1734,9 +1920,10 @@ export class Bridge {
 }
 
 /**
- * What a person changes about the harness's agents from their pages (Chips ADRs 0134, 0146), for
- * `connect({ settings })`: their files, for Claude Code and Codex, whose files this bridge knows;
- * and their context windows, for any kind. `bridge` is the one running, once it is.
+ * What a person changes about the harness's agents from their pages (Chips ADRs 0134, 0146, 0241),
+ * for `connect({ settings })`: their files and their models, for Claude Code and Codex, whose files
+ * and model options this bridge knows; and their context windows, for any kind. `bridge` is the one
+ * running, once it is.
  */
 export function settingsFor(kind: KindConfig, bridge: () => Bridge | undefined): SettingsHandlers {
   const active = (): Bridge => {
@@ -1745,7 +1932,12 @@ export function settingsFor(kind: KindConfig, bridge: () => Bridge | undefined):
     return running;
   };
   return {
-    ...(knownIdOf(kind) === undefined ? {} : { context: (edit: ContextEditFrame) => active().contextEdited(edit) }),
+    ...(knownIdOf(kind) === undefined
+      ? {}
+      : {
+          context: (edit: ContextEditFrame) => active().contextEdited(edit),
+          models: (change: ModelChangeFrame) => active().modelChange(change),
+        }),
     contextWindows: {
       compact: (ask) => active().windowCompact(ask),
       change: (ask) => active().windowChange(ask),

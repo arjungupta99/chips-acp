@@ -26,9 +26,12 @@
  * every turn, as Claude Code does signed out; with `refusesSessions` it refuses each session too, as
  * Codex does.
  *
- * With `askFirst`, anything else said in the first session it made asks permission to write the
+ * With `askFirst`, anything else said in the first session it was spoken to in asks permission to write the
  * tracker first, as a real agent asks before it changes something. It copies sessions (`session/fork`) unless `fork` is false, and
  * closes them (`session/close`) when `close` is true.
+ *
+ * With `models`, each session offers its model and its model's levels as config options, as Claude
+ * Code's and Codex's adapters do (`FakeModels`), and is put on others with `session/set_config_option`.
  */
 
 import { writeFileSync } from "node:fs";
@@ -36,6 +39,21 @@ import { join } from "node:path";
 import type { Wire } from "../src/acp.ts";
 
 type Message = Record<string, unknown>;
+
+/** What it offers to run on, and how it is put on another. */
+export interface FakeModels {
+  /** What a new session is on, and at what level. */
+  readonly current: string;
+  readonly effort?: string;
+  /** What its model option lists, each with its levels, lowest first. */
+  readonly choices: readonly { readonly id: string; readonly name: string; readonly efforts?: readonly string[] }[];
+  /** Its effort option's id: Claude Code's `effort` unless said, Codex's `reasoning_effort`. */
+  readonly effortId?: string;
+  /** Claude Code's `default` level among its levels, which hands the level back to its settings. */
+  readonly settingsLevel?: boolean;
+  /** Models it lists and refuses to be put on. */
+  readonly refuses?: readonly string[];
+}
 
 export interface FakeAgent {
   readonly wire: () => Wire;
@@ -52,6 +70,8 @@ export interface FakeAgent {
   readonly closed: string[];
   /** The `_meta` of each session made, loaded or copied, as `<method> <session>` and the meta. */
   readonly metas: { readonly call: string; readonly meta: unknown }[];
+  /** `<session> <option>=<value>` for each option it was set to, refused or not. */
+  readonly sets: string[];
   /** How many times it was started. */
   starts: number;
 }
@@ -67,10 +87,14 @@ export function fakeAgent(
     compaction?: "claude" | "codex";
     model?: string;
     commands?: readonly string[];
+    models?: FakeModels;
   } = {},
 ): FakeAgent {
+  /** The first session it was spoken to in. */
+  let spokenIn: string | undefined;
   const agent: FakeAgent = {
     metas: [],
+    sets: [],
     prompts: [],
     made: [],
     loaded: [],
@@ -95,6 +119,72 @@ export function fakeAgent(
         send({ method: "session/update", params: { sessionId, update: body } });
       /** What each session holds, as it last said. */
       const held = new Map<string, number>();
+      /** What each session runs on, where it offers models. */
+      const on = new Map<string, { model: string; effort?: string | undefined }>();
+      const models = options.models;
+      const effortId = models?.effortId ?? "effort";
+      const choiceOf = (model: string) => models?.choices.find((choice) => choice.id === model);
+      /** A session's options, as an answer carries them: none without `models`. */
+      const configOptions = (sessionId: string): Message => {
+        if (models === undefined) return {};
+        const now = on.get(sessionId) ?? { model: models.current, effort: models.effort };
+        on.set(sessionId, now);
+        const listed = models.choices.map((choice) => ({ value: choice.id, name: choice.name }));
+        // A model it doesn't list is offered first while a session is on it, as Codex does.
+        if (choiceOf(now.model) === undefined) listed.unshift({ value: now.model, name: now.model });
+        const levels = choiceOf(now.model)?.efforts ?? [];
+        return {
+          configOptions: [
+            { id: "model", name: "Model", category: "model", type: "select", currentValue: now.model, options: listed },
+            ...(levels.length === 0
+              ? []
+              : [
+                  {
+                    id: effortId,
+                    name: "Effort",
+                    category: "thought_level",
+                    type: "select",
+                    currentValue: now.effort ?? levels[0],
+                    options: [
+                      ...(models.settingsLevel === true ? [{ value: "default", name: "Default" }] : []),
+                      ...levels.map((level) => ({ value: level, name: level.charAt(0).toUpperCase() + level.slice(1) })),
+                    ],
+                  },
+                ]),
+          ],
+        };
+      };
+      /** Put on another model or level, or refused as the adapters refuse. */
+      const setOption = (id: unknown, sessionId: string, configId: string, value: string) => {
+        agent.sets.push(`${sessionId} ${configId}=${value}`);
+        const now = on.get(sessionId);
+        if (models === undefined || now === undefined) {
+          send({ id, error: { code: -32602, message: "Invalid params" } });
+          return;
+        }
+        if (configId === "model") {
+          const choice = choiceOf(value);
+          if (models.refuses?.includes(value) === true) {
+            send({ id, error: { code: -32603, message: "Internal error" } });
+            return;
+          }
+          if (choice === undefined && value !== now.model) {
+            send({ id, error: { code: -32602, message: "Invalid params" } });
+            return;
+          }
+          const levels = choice?.efforts ?? [];
+          on.set(sessionId, { model: value, effort: levels.includes(now.effort ?? "") ? now.effort : levels[0] });
+        } else if (configId === effortId) {
+          const levels = choiceOf(now.model)?.efforts ?? [];
+          if (value === "default" && models.settingsLevel === true) now.effort = models.effort;
+          else if (levels.includes(value)) now.effort = value;
+          else {
+            send({ id, error: { code: -32602, message: "Invalid params" } });
+            return;
+          }
+        }
+        send({ id, result: configOptions(sessionId) });
+      };
       const usage = (sessionId: string, used: number, cost?: number) => {
         held.set(sessionId, used);
         update(sessionId, {
@@ -256,7 +346,8 @@ export function fakeAgent(
           reply("end_turn");
           return;
         }
-        if (options.askFirst === true && sessionId === agent.made[0]) {
+        spokenIn ??= sessionId;
+        if (options.askFirst === true && sessionId === spokenIn) {
           await ask("session/request_permission", {
             sessionId,
             toolCall: { toolCallId: "t0", title: "Edit tracker.md", kind: "edit", rawInput: { path: "tracker.md" } },
@@ -328,7 +419,7 @@ export function fakeAgent(
             agent.made.push(sessionId);
             agent.cwds.set(sessionId, String(params["cwd"]));
             agent.metas.push({ call: `new ${sessionId}`, meta: params["_meta"] });
-            send({ id, result: { sessionId } });
+            send({ id, result: { sessionId, ...configOptions(sessionId) } });
             if (options.commands !== undefined) {
               update(sessionId, {
                 sessionUpdate: "available_commands_update",
@@ -341,19 +432,23 @@ export function fakeAgent(
             agent.loaded.push(String(params["sessionId"]));
             agent.cwds.set(String(params["sessionId"]), String(params["cwd"]));
             agent.metas.push({ call: `load ${String(params["sessionId"])}`, meta: params["_meta"] });
-            send({ id, result: null });
+            send({ id, result: models === undefined ? null : configOptions(String(params["sessionId"])) });
             return;
           case "session/fork": {
             if (options.fork === false) break;
             const sessionId = `fork-${agent.forks.length + 1}`;
             agent.forks.push(`${String(params["sessionId"])}>${sessionId}`);
             agent.cwds.set(sessionId, String(params["cwd"]));
-            send({ id, result: { sessionId } });
+            const original = on.get(String(params["sessionId"]));
+            if (original !== undefined) on.set(sessionId, { ...original });
+            send({ id, result: { sessionId, ...configOptions(sessionId) } });
             return;
           }
           case "session/close":
             if (options.close !== true) break;
             agent.closed.push(String(params["sessionId"]));
+            // Loaded again, it runs on what a new one does.
+            on.delete(String(params["sessionId"]));
             send({ id, result: {} });
             return;
           case "session/prompt": {
@@ -361,6 +456,9 @@ export function fakeAgent(
             void prompt(id, String(params["sessionId"]), blocks.map((block) => block.text ?? "").join("\n"));
             return;
           }
+          case "session/set_config_option":
+            setOption(id, String(params["sessionId"]), String(params["configId"]), String(params["value"]));
+            return;
           case "session/set_mode":
             agent.modes.push(`${String(params["sessionId"])}:${String(params["modeId"])}`);
             send({ id, result: {} });

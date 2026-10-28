@@ -194,19 +194,22 @@ export class AcpClient {
     return { configOptions: configOptionsOf(answer ?? {}) };
   }
 
-  /** A copy of a session, remembering everything it does, working in `cwd`. Answers with the copy's id. */
+  /**
+   * A copy of a session, remembering everything it does, working in `cwd`. Answers with the copy's
+   * id and anything it said the copy can be set to.
+   */
   async forkSession(
     sessionId: string,
     cwd: string,
     mcpServers: readonly unknown[] = [],
     meta?: Readonly<Record<string, unknown>>,
-  ): Promise<string> {
+  ): Promise<{ sessionId: string; configOptions: readonly ConfigOption[] }> {
     const answer = (await this.call("session/fork", { sessionId, cwd, mcpServers, ...metaOf(meta) })) as Record<
       string,
       unknown
     >;
     if (typeof answer["sessionId"] !== "string") throw new AcpError("the agent copied the session and named no copy", -32000);
-    return answer["sessionId"];
+    return { sessionId: answer["sessionId"], configOptions: configOptionsOf(answer) };
   }
 
   /** Let a session go: the agent keeps it, and `session/load` brings it back. */
@@ -335,7 +338,8 @@ export interface ConfigOption {
   readonly options: readonly { readonly value: string; readonly name: string }[];
 }
 
-function configOptionsOf(answer: Readonly<Record<string, unknown>>): ConfigOption[] {
+/** The options an answer, or a `config_option_update`, says a session has. */
+export function configOptionsOf(answer: Readonly<Record<string, unknown>>): ConfigOption[] {
   const raw = answer["configOptions"];
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((each) => {
@@ -347,10 +351,11 @@ function configOptionsOf(answer: Readonly<Record<string, unknown>>): ConfigOptio
         name: typeof option["name"] === "string" ? option["name"] : option["id"],
         ...(typeof option["category"] === "string" ? { category: option["category"] } : {}),
         currentValue: String(option["currentValue"] ?? ""),
-        options: (option["options"] as Record<string, unknown>[]).map((value) => ({
-          value: String(value["value"]),
-          name: String(value["name"] ?? value["value"]),
-        })),
+        // A select's values, or its groups' (`{ group, name, options }`), in order.
+        options: (option["options"] as Record<string, unknown>[])
+          .flatMap((value) => (Array.isArray(value["options"]) ? (value["options"] as Record<string, unknown>[]) : [value]))
+          .filter((value) => typeof value["value"] === "string")
+          .map((value) => ({ value: String(value["value"]), name: String(value["name"] ?? value["value"]) })),
       },
     ];
   });

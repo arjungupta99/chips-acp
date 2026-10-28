@@ -76,8 +76,9 @@ const joined = await joinChips({
     "new_agents",
     "forks",
     "restarts",
-    // Each agent's files, for the kinds whose files the bridge knows, and every agent's context window.
-    ...(knownIdOf(kind) === undefined ? [] : ["context_files"]),
+    // Each agent's files and its model, for the kinds whose files and models the bridge knows, and
+    // every agent's context window.
+    ...(knownIdOf(kind) === undefined ? [] : ["context_files", "models"]),
     "context_windows",
   ],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
@@ -87,7 +88,12 @@ const joined = await joinChips({
 keepIfAsked(LABEL, joined.url, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], log);
 
 const kept = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as Partial<BridgeState>) : {};
-const state: BridgeState = { sessions: kept.sessions ?? {}, agents: kept.agents ?? {}, windows: kept.windows ?? {} };
+const state: BridgeState = {
+  sessions: kept.sessions ?? {},
+  agents: kept.agents ?? {},
+  windows: kept.windows ?? {},
+  ...(kept.models === undefined ? {} : { models: kept.models }),
+};
 // The agent's environment: this process's, the config's, and for Codex the room to read a whole AGENTS.md.
 const env = adapterEnv(kind, { ...process.env, ...kind.env });
 
@@ -101,7 +107,7 @@ const chips = await connect({
     log("a person asked for a restart");
     await bridge?.restart();
   },
-  // An agent's files and its context window, changed from its page (Chips ADRs 0134, 0146).
+  // An agent's files, its context window and its model, changed from its page (Chips ADRs 0134, 0146, 0241).
   settings: settingsFor(kind, () => bridge),
 });
 
@@ -113,6 +119,8 @@ bridge = new Bridge({
   chips,
   kind,
   projects: git.ok,
+  // Claude Code's and Codex's adapters offer their models as session options (Chips ADR 0241).
+  models: knownIdOf(kind) !== undefined,
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
   wire: () => processWire(kind.command, kind.folder ?? kind.folders, env, (line) => log(`${kind.name}: ${line}`)),

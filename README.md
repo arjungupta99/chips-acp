@@ -160,9 +160,9 @@ permissions, and each permission it asks for is an approval card.
 
 ### What Chips shows on an agent's page
 
-The bridge says `context` (Claude Code and Codex) and `context_windows` (every kind) in its hello,
-and sends each agent's copies when it starts and as they change. Chips draws them where the
-harness is granted `context_files` and `context_windows`.
+The bridge says `context` and `models` (Claude Code and Codex) and `context_windows` (every kind)
+in its hello, and sends each agent's copies when it starts and as they change. Chips draws them
+where the harness is granted `context_files`, `models` and `context_windows`.
 
 | Chips | Claude Code | Codex | Another kind |
 |---|---|---|---|
@@ -172,6 +172,9 @@ harness is granted `context_files` and `context_windows`.
 | Context window | `usage_update` of the agent's session that said last; the window from the update that ends a turn (it carries the cost), as one before may be a default | `usage_update` | `usage_update` |
 | Compact now | `/compact` said to that session as a turn of its own, after any turn going there; its words go nowhere; from and to from its tool call's `rawOutput` | the same; to from the `usage_update` it sends as it finishes | where it lists `compact` among its commands |
 | Its limit | its own from `autoCompactWindow` in its settings (`modelSettings` per model), about 33,000 tokens short of it; a pick from Chips goes in each session's `_meta.claudeCode.options.settings`, never in a file; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` beats both, and the limit can't be changed then | the bridge's: after a turn that ends at or past it, the bridge compacts that session; off unless picked | as Codex, where it has `compact` |
+| Model | the models its adapter offers for a session (the `model` option), each with its levels (`effort`, without its `default`), by the adapter's own names (its `xhigh` is Extra high); Same as "Claude Code's default" is what a new session starts on: `model` in its settings, or its own `default` | the same, with `reasoning_effort`; the default from Codex's config, which may be a model its list leaves out, with no levels | none |
+| Where it learns them | each time the bridge starts the agent, a session opened in the harness's folder and put on each model in turn, then closed, with nothing said to it; a model it won't be put on isn't offered | the same | |
+| A pick | set on each of the agent's sessions with `session/set_config_option`, now and as each opens after, never in a file; kept with the agent, and a copy from Fork starts with its original's. Same as again puts each back on the default, and its level on Claude Code's `default`, which follows its settings | the same; a session Codex won't put back on a model its list leaves out is let go and loaded again before its next turn | |
 
 An edit is saved only if the file is still what the person read; otherwise it is refused as changed.
 The bridge's own Codex adapter runs with `project_doc_max_bytes` at 64 KiB in `CODEX_CONFIG`, laid
@@ -180,8 +183,8 @@ write (32 KiB unless set).
 
 ## Not built yet
 
-From the plan's Phase 4: agents over WebSocket (`goose serve`); `follows_rooms`; models and effort
-from `configOptions`; the bridge's own MCP server (reminders, ask a person) and heartbeats; sub-agents as lanes; free-text form fields; approval scopes limited to the
+From the plan's Phase 4: agents over WebSocket (`goose serve`); `follows_rooms`; models for any
+other kind; the bridge's own MCP server (reminders, ask a person) and heartbeats; sub-agents as lanes; free-text form fields; approval scopes limited to the
 agent's options (a wire change, Phase 6).
 
 ## Tests
@@ -194,9 +197,10 @@ A scripted ACP agent (`test/fake-agent.ts`), in process and as a child process, 
 conformance kit's fake Chips, which checks every event against the protocol's schemas; and the kit's
 golden scenario with the +, Add and Fork, which
 `chips conformance custom --capabilities agents,new_spaces,new_agents,forks,restarts` runs live:
-Lives in Chips 5 of 6. Run as Claude Code with `context_files` and `context_windows` besides, the
-kit's settings checks pass: Managed from Chips 2 of 5. `test/settings.test.ts` plays the files and
-the windows of each kind, from a home of its own.
+Lives in Chips 5 of 6. Run as Claude Code with `context_files`, `context_windows` and `models`
+besides, the kit's settings checks pass: Managed from Chips 3 of 5. `test/settings.test.ts` plays the
+files, the windows and the models of each kind, from a home of its own; its models are the ones
+Claude Code's adapter 0.90.0 and Codex's 2.2.2 offered on 28 October 2026.
 
 ```bash
 npm run e2e

@@ -1,6 +1,6 @@
 /**
  * What a person sees and changes of the harness's agents from their pages (Chips ADRs 0134, 0146,
- * 0238): their files, for Claude Code and Codex, and their context windows. Against Chips's
+ * 0238, 0241): their files and their models, for Claude Code and Codex, and their context windows. Against Chips's
  * conformance fake, which checks every copy against the protocol's schemas, with an ACP agent in
  * this process and a home of the test's own, so nobody's `~/.claude` or `~/.codex` is read.
  */
@@ -16,9 +16,9 @@ import { newId } from "@chipschat/protocol";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "../src/bridge.ts";
 import { ContextFiles, hashOf } from "../src/context.ts";
 import { adapterEnv, codexDocBytes } from "../src/kinds.ts";
-import { type FakeAgent, fakeAgent } from "./fake-agent.ts";
+import { type FakeAgent, type FakeModels, fakeAgent } from "./fake-agent.ts";
 
-const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "restarts", "context_files", "context_windows"];
+const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "restarts", "context_files", "context_windows", "models"];
 
 const KINDS = {
   claude: { name: "Claude Code", program: "claude-agent-acp", folder: "claude-code" },
@@ -51,7 +51,7 @@ afterEach(async () => {
 
 async function rig(
   which: keyof typeof KINDS,
-  options: { agent?: FakeAgent; state?: BridgeState; chips?: FakeChips; home?: string; env?: NodeJS.ProcessEnv } = {},
+  options: { agent?: FakeAgent; state?: BridgeState; chips?: FakeChips; home?: string; env?: NodeJS.ProcessEnv; models?: boolean } = {},
 ): Promise<Rig> {
   const known = KINDS[which];
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES, harnessName: known.name }));
@@ -85,6 +85,7 @@ async function rig(
     respawnMs: 20,
     env: options.env ?? {},
     home,
+    models: options.models,
   });
   const running = bridge;
   open.push(async () => {
@@ -433,5 +434,180 @@ describe("an agent's context window (Chips ADR 0146)", () => {
     await until(() => at.state.agents[key] === undefined);
     assert.equal(at.state.windows?.[key], undefined);
     assert.ok(existsSync(at.folder), "its folder stays");
+  });
+});
+
+const LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+/** Claude Code's, as its adapter offered them on 28 October 2026: its own `default` first, and one it won't be put on. */
+const CLAUDE_MODELS: FakeModels = {
+  current: "default",
+  effort: "high",
+  settingsLevel: true,
+  choices: [
+    { id: "default", name: "Default (recommended)", efforts: LEVELS },
+    { id: "opus", name: "Opus 5.5", efforts: LEVELS },
+    { id: "claude-fable-5-1[1m]", name: "Fable 5.1", efforts: LEVELS },
+    { id: "sonnet", name: "Sonnet 5.5", efforts: LEVELS },
+    { id: "haiku", name: "Haiku 5.5", efforts: LEVELS },
+  ],
+  refuses: ["claude-fable-5-1[1m]"],
+};
+
+/** Codex's: a new session on a model its list leaves out, with no levels, which it won't be put back on. */
+const CODEX_MODELS: FakeModels = {
+  current: "gpt-6.1-sol",
+  effortId: "reasoning_effort",
+  choices: [
+    { id: "gpt-6-luna", name: "6 Luna", efforts: LEVELS },
+    { id: "gpt-5.6-terra", name: "5.6 Terra", efforts: [...LEVELS, "ultra"] },
+  ],
+};
+
+const modelOf = (rig: Rig, agentId = rig.agentId) => rig.chips.settings.copy("model", agentId) as Body | undefined;
+const choicesOf = (copy: Body) => copy["choices"] as { id: string; label: string; efforts: { id: string; label: string }[] }[];
+
+/** A person's pick from the agent's page, answered. */
+async function pick(rig: Rig, model: string | null, effort: string | null, agentId = rig.agentId) {
+  const changeId = newId("change");
+  await hear(rig, { frame: "model.change", change_id: changeId, agent_id: agentId, model, effort });
+  return rig.chips.settings.answerTo(changeId);
+}
+
+describe("an agent's model (Chips ADRs 0140, 0241)", () => {
+  it("looks at what Claude Code offers as it starts, and shows each agent on the default", async () => {
+    const agent = fakeAgent({ loadSession: true, close: true, models: CLAUDE_MODELS });
+    const at = await rig("claude", { agent, models: true });
+    const copy = await until(() => modelOf(at));
+    assert.deepEqual(
+      choicesOf(copy).map((choice) => [choice.id, choice.label]),
+      [
+        ["default", "Default (recommended)"],
+        ["opus", "Opus 5.5"],
+        ["sonnet", "Sonnet 5.5"],
+        ["haiku", "Haiku 5.5"],
+      ],
+      "Fable left out: it won't be put on it",
+    );
+    assert.deepEqual(
+      choicesOf(copy)[1]?.efforts.map((level) => level.label),
+      ["Low", "Medium", "High", "Extra high", "Max"],
+      "its levels, without Claude Code's own default",
+    );
+    assert.deepEqual(copy["default"], { label: "Claude Code's default", model: "default", effort: "high" });
+    assert.equal(copy["model"], "default");
+    assert.equal(copy["effort"], "high");
+    assert.equal(copy["own"], false);
+    assert.equal(copy["editable"], true);
+    assert.ok(at.logs.some((line) => line.includes("won't be put on claude-fable-5-1[1m]")));
+
+    // The look: one session in the harness's folder, let go, with nothing said to it.
+    const look = agent.made[0] ?? "";
+    assert.equal(agent.cwds.get(look), at.kind.folders);
+    assert.deepEqual(agent.closed, [look]);
+    assert.deepEqual(agent.prompts, []);
+    assert.deepEqual(at.state.models?.default, { model: "default", effort: "high" });
+  });
+
+  it("sets a pick on the agent's sessions and on each it opens after, and drops it back to Claude Code's own", async () => {
+    const agent = fakeAgent({ loadSession: true, close: true, models: CLAUDE_MODELS });
+    const at = await rig("claude", { agent, models: true });
+    await until(() => modelOf(at));
+    await turn(at.chips, "hello");
+    const session = agent.made.at(-1) ?? "";
+    assert.deepEqual(agent.sets.filter((each) => each.startsWith(session)), [], "on the default already: nothing set");
+
+    assert.equal((await pick(at, "sonnet", "low"))?.made, true);
+    assert.deepEqual(agent.sets.slice(-2), [`${session} model=sonnet`, `${session} effort=low`]);
+    const picked = modelOf(at) ?? {};
+    assert.deepEqual([picked["model"], picked["effort"], picked["own"]], ["sonnet", "low", true]);
+    const key = Object.keys(at.state.agents).find((each) => at.state.agents[each]?.agentId === at.agentId) ?? "";
+    assert.deepEqual(at.state.agents[key]?.model, { model: "sonnet", effort: "low" }, "kept with the agent");
+
+    // Started again, its session is loaded back on the default, and put on the pick as it opens.
+    await at.bridge.restart();
+    agent.sets.length = 0;
+    await turn(at.chips, "again");
+    assert.deepEqual(agent.loaded, [session]);
+    assert.deepEqual(
+      agent.sets.filter((each) => each.startsWith(session)),
+      [`${session} model=sonnet`, `${session} effort=low`],
+    );
+
+    // Dropped: the model and the level back to Claude Code's own.
+    assert.equal((await pick(at, null, null))?.made, true);
+    assert.deepEqual(agent.sets.slice(-2), [`${session} model=default`, `${session} effort=default`]);
+    const dropped = modelOf(at) ?? {};
+    assert.deepEqual([dropped["model"], dropped["effort"], dropped["own"]], ["default", "high", false]);
+    assert.equal(at.state.agents[key]?.model, undefined);
+    assert.deepEqual(notSent(at), []);
+  });
+
+  it("gives a copy its original's pick, and a pick to one agent only", async () => {
+    const agent = fakeAgent({ loadSession: true, close: true, models: CLAUDE_MODELS });
+    const at = await rig("claude", { agent, models: true });
+    await until(() => modelOf(at));
+    await turn(at.chips, "hello");
+    await pick(at, "opus", "max");
+    const spaceId = await at.chips.openRoom("Second opinion");
+    const { forkId } = await at.chips.askForFork(at.agentId, spaceId);
+    const joined = await at.chips.waitFor(
+      (event) => (event.type === "membership.added" && event.payload["fork_of"] === forkId ? event : undefined),
+      3000,
+    );
+    const copyId = String(joined.payload["agent_id"] ?? joined.payload["participant_id"]);
+    const copied = await until(() => modelOf(at, copyId));
+    assert.deepEqual([copied["model"], copied["effort"], copied["own"]], ["opus", "max", true]);
+    assert.ok(agent.sets.includes("fork-1 effort=max"), "its copied session holds the level too");
+
+    assert.equal((await pick(at, "haiku", "low", copyId))?.made, true);
+    assert.deepEqual(agent.sets.slice(-2), ["fork-1 model=haiku", "fork-1 effort=low"]);
+    assert.deepEqual([modelOf(at)?.["model"], modelOf(at)?.["effort"]], ["opus", "max"], "the original's stays");
+    assert.ok(!agent.sets.some((each) => each.startsWith(agent.made.at(-1) ?? "") && each.endsWith("=haiku")));
+  });
+
+  it("refuses a model the agent doesn't offer, or a level its model hasn't", async () => {
+    const at = await rig("claude", { agent: fakeAgent({ models: CLAUDE_MODELS }), models: true });
+    await until(() => modelOf(at));
+    for (const [model, effort] of [
+      ["gpt-6-luna", null],
+      ["claude-fable-5-1[1m]", "high"],
+      ["sonnet", "ultra"],
+    ] as const) {
+      const answer = await pick(at, model, effort);
+      assert.equal(answer?.made, false, model);
+      assert.equal(answer?.message, "Claude Code doesn't offer that.");
+    }
+    assert.equal(modelOf(at)?.["own"], false);
+  });
+
+  it("puts Codex back on its default where it will, and loads a session again where it won't", async () => {
+    const agent = fakeAgent({ loadSession: true, close: true, models: CODEX_MODELS });
+    const at = await rig("codex", { agent, models: true });
+    const copy = await until(() => modelOf(at));
+    assert.deepEqual(
+      choicesOf(copy).map((choice) => [choice.id, choice.efforts.length]),
+      [
+        ["gpt-6.1-sol", 0],
+        ["gpt-6-luna", 5],
+        ["gpt-5.6-terra", 6],
+      ],
+    );
+    assert.deepEqual(copy["default"], { label: "Codex's default", model: "gpt-6.1-sol" });
+    assert.equal(copy["effort"], undefined);
+    await turn(at.chips, "hello");
+    const session = agent.made.at(-1) ?? "";
+
+    assert.equal((await pick(at, "gpt-6-luna", "high"))?.made, true);
+    assert.deepEqual(agent.sets.slice(-2), [`${session} model=gpt-6-luna`, `${session} reasoning_effort=high`]);
+
+    // Codex won't put a session back on a model it doesn't list: it is loaded again before its next turn.
+    assert.equal((await pick(at, null, null))?.made, true);
+    assert.equal(agent.sets.at(-1), `${session} model=gpt-6.1-sol`);
+    assert.equal(modelOf(at)?.["own"], false);
+    assert.ok(!agent.closed.includes(session), "not while it is quiet");
+    await turn(at.chips, "again");
+    assert.ok(agent.closed.includes(session), "closed before its next turn");
+    assert.deepEqual(agent.loaded, [session], "and loaded again");
   });
 });
