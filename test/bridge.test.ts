@@ -643,12 +643,22 @@ describe("a copy a person asks for", () => {
 });
 
 describe("what it asks", () => {
-  it("asks permission on a card, and gives the agent its always when a person allows always", async () => {
+  it("asks permission on a card, and gives a command's Always to the agent as once (Chips ADR 0239)", async () => {
     const { chips } = await rig();
     await chips.say("ask");
     const asked = await sent(chips, "approval.request");
     assert.equal((asked.payload["action"] as { kind: string }).kind, "acp.execute");
     assert.equal(asked.payload["question"], "Allow it to run npm test?");
+    await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    // Chips remembers how the command starts and answers the next one itself.
+    assert.equal(words.payload["text"], "Given: once");
+  });
+
+  it("gives the agent its always when a person allows always for what is not a command", async () => {
+    const { chips } = await rig();
+    await chips.say("ask edit");
+    const asked = await sent(chips, "approval.request");
     await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
     const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
     assert.equal(words.payload["text"], "Given: always");

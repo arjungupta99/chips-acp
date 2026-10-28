@@ -1700,7 +1700,7 @@ export class Bridge {
     const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
     const decision = await Promise.race([asked, stopped]);
     if (decision === undefined) return { outcome: { outcome: "cancelled" } };
-    const chosen = optionFor(decision, options);
+    const chosen = optionFor(decision, options, carriesCommand(input));
     if (decision.allowed && chosen !== undefined && call["toolCallId"] !== undefined) {
       turn.allowed.set(String(call["toolCallId"]), decision.approvalId);
     }
@@ -1852,15 +1852,27 @@ function riskOf(kind: string): RiskClass[] {
   return [];
 }
 
-/** The agent's option for a decision: always where it was allowed always and it has one. */
+/**
+ * The agent's option for a decision: always where it was allowed always and it has one. A
+ * command's Always is the agent's once (Chips ADR 0239): Chips remembers it by how each part
+ * starts and answers the next ask itself, where the agent's own always would let through more.
+ */
 function optionFor(
   decision: Decision,
   options: readonly { optionId: string; kind: string }[],
+  command: boolean,
 ): string | undefined {
   const find = (kind: string) => options.find((option) => option.kind === kind)?.optionId;
   if (!decision.allowed) return find("reject_once") ?? find("reject_always");
-  if (decision.scope === "always") return find("allow_always") ?? find("allow_once");
+  if (decision.scope === "always" && !command) return find("allow_always") ?? find("allow_once");
   return find("allow_once") ?? find("allow_always");
+}
+
+/** Whether a tool call's input carries a command, as a shell runs it: a string or its words. */
+function carriesCommand(input: unknown): boolean {
+  if (typeof input !== "object" || input === null) return false;
+  const command = (input as Record<string, unknown>)["command"];
+  return typeof command === "string" || Array.isArray(command);
 }
 
 function questionOf(

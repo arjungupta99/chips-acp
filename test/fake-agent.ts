@@ -4,7 +4,8 @@
  *
  * - anything else: a thought, a tool call that reads a file, two chunks of words, a usage update
  *   with its cost, and `end_turn`;
- * - `ask`: it asks permission to run `npm test`, and says which option it was given;
+ * - `ask`: it asks permission to run `npm test`, and says which option it was given; `ask edit`,
+ *   the same to edit `notes.md`;
  * - `form`: it asks with a form which colour, and says the answer;
  * - `slow`: it waits until cancelled;
  * - `nothing`: it says `NO_REPLY`;
@@ -215,6 +216,21 @@ export function fakeAgent(
           const answer = await ask("session/request_permission", {
             sessionId,
             toolCall: { toolCallId: "t2", title: "Run npm test", kind: "execute", rawInput: { command: "npm test" } },
+            options: [
+              { optionId: "once", name: "Allow once", kind: "allow_once" },
+              { optionId: "always", name: "Always allow", kind: "allow_always" },
+              { optionId: "no", name: "Reject", kind: "reject_once" },
+            ],
+          });
+          const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+          say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
+          reply("end_turn");
+          return;
+        }
+        if (last === "ask edit") {
+          const answer = await ask("session/request_permission", {
+            sessionId,
+            toolCall: { toolCallId: "t3", title: "Edit notes.md", kind: "edit", rawInput: { path: "notes.md" } },
             options: [
               { optionId: "once", name: "Allow once", kind: "allow_once" },
               { optionId: "always", name: "Always allow", kind: "allow_always" },
