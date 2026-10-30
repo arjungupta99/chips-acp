@@ -13,11 +13,11 @@ the Chips repo with `pnpm release:sdk`.
 
 ## From Chips's gallery
 
-The card's line is `chips connect claude-code '<link>'` or `chips connect codex '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+The card's line is `CHIPS_JOIN_LINK='<link>' chips connect claude-code` or `CHIPS_JOIN_LINK='<link>' chips connect codex` (Chips ADR 0218). It downloads this bridge as the npm package
 `@chipschat/acp`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
 that Chips carries, so the machine needs no Node or npm of its own. The bridge checks the agent's ACP adapter and its sign-in,
 joins, and keeps itself running from login. `chips disconnect claude-code` or `chips disconnect codex` stops it. Claude Code and Codex share this one package: their cards hand it `~/.chips-acp/claude-code.json` or `codex.json`, and the file's name picks the kind. On another computer,
-`curl -fsSL https://chipschat.ai/install | sh -s -- connect claude-code '<link>'` installs Chips there
+`curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect claude-code` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
 
 ## Run it
@@ -31,7 +31,7 @@ CHIPS_JOIN_LINK='<a join link made in Chips>' npm run keep ~/.chips-acp/claude-c
 `npm run keep` joins, then keeps the bridge running from login ("Keep it running", below);
 `npm start` is the same in the terminal only.
 
-The link comes from Chips's gallery (Add an agent → Claude Code, or Codex), whose card gives this
+The link comes from Chips's gallery (Agents → Connect a harness → Claude Code, or Codex), whose card gives this
 line with the link in it (`codex.json` for Codex) and starts the link with what it needs on:
 `agents`, `new_spaces`, `new_agents`, `forks` and `restarts`. `claude-code.json` and `codex.json`
 need not be there: without them the bridge runs Claude Code or Codex, in the mode that asks (see

@@ -24,6 +24,7 @@ import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { adapterEnv, knownIdOf } from "./kinds.js";
 import { checkCommand, checkSignIn, readConfig, SetupError } from "./setup.js";
+import { VERSION } from "./version.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -69,7 +70,7 @@ const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
   name: kind.name,
-  software: "chips-acp 1.0.0",
+  software: `chips-acp ${VERSION}`,
   wants: [
     "agents",
     "new_spaces",
@@ -101,7 +102,7 @@ let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
-  client: { name: "chips-acp", version: "1.0.0" },
+  client: { name: "chips-acp", version: VERSION },
   store: fileStore(join(folder, "chips-state.json")),
   onRestart: async () => {
     log("a person asked for a restart");

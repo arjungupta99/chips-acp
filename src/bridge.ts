@@ -77,6 +77,7 @@ import {
 import { settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
+import { VERSION } from "./version.js";
 import {
   type Catalog,
   effortOption,
@@ -185,7 +186,6 @@ export interface BridgeOptions {
   readonly home?: string | undefined;
 }
 
-const VERSION = "1.0.0";
 /** How often a run's status and context gauge may change, so a stream of thoughts isn't a stream of events. */
 const QUIET_MS = 1500;
 /** How long a message waits for the agent to be running again before its run fails. */
