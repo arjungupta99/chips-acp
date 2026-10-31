@@ -11,7 +11,8 @@
  * quiet for a while is closed, and loaded again on the next word.
  *
  * A message for an agent is a run: `session/prompt` with what Chips hands over (the room note,
- * what was said, the words), and what the agent streams back is the run — thoughts as its status,
+ * what was said, the words; the room's rules once a session, and again after it compacts, Chips
+ * ADR 0250), and what the agent streams back is the run — thoughts as its status,
  * tool calls as steps, its plan, its context gauge and cost — then its words in the room. What it
  * asks permission for is an approval card; what it asks with a form is a question card. Stop is
  * `session/cancel`. A steer is said to it as the next prompt of the same run, after stopping the
@@ -44,7 +45,15 @@ import type {
   Speaker,
   SpaceAsked,
 } from "@chipschat/harness";
-import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer } from "@chipschat/harness";
+import {
+  heldNote,
+  promptFor,
+  pushedInWords,
+  Refuse,
+  rulesFor,
+  SessionRules,
+  sendAnswer,
+} from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -325,6 +334,8 @@ export class Bridge {
   private offersCompact = false;
   /** Each session's last `used`, for where a compaction began. */
   private readonly sessionUsed = new Map<string, number>();
+  /** The room's rules each session holds (Chips ADR 0250): said once, and again after it compacts. */
+  private readonly rules = new SessionRules();
   private readonly compactions = new Map<string, Compaction>();
   /** The bridge's own `/compact` turns, by session. */
   private readonly compactRuns = new Map<string, CompactRun>();
@@ -966,20 +977,26 @@ export class Bridge {
     turn.costAtStart = this.costs.get(sessionId);
 
     const project = await this.projectFor(turn, record, spaceId, speakerId ?? record.agentId);
-    let words = promptFor(message, {
+    const asked = {
       ...(speakerId === undefined ? {} : { taker: speakerId }),
       ...(again === undefined ? {} : { sayWho: false }),
       sendsFiles: true,
       project,
-    });
+    };
+    // A session told the room's rules isn't told them again until they change or it compacts.
+    const rules = rulesFor(message, asked);
+    let words = promptFor(message, { ...asked, rulesHeld: this.rules.holds(sessionId, rules) });
     const files = await this.filesFor(record, message);
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
     if (turn.cancelled) return;
+    // Told as it is given, so a compaction during the turn, heard after, forgets them.
+    this.rules.told(sessionId, rules);
     let stop = "end_turn";
     for (let prompt: string | undefined = words; prompt !== undefined; prompt = turn.next.shift()) {
       try {
         stop = await client.prompt(sessionId, [{ type: "text", text: prompt }]);
       } catch (error) {
+        this.rules.forget(sessionId);
         if (!run.over) await run.fail({ error: this.failure(record, error), retryable: true });
         return;
       }
@@ -1522,6 +1539,8 @@ export class Bridge {
       if (update.sessionUpdate !== "tool_call" || !isCompaction(update)) return;
       compaction = { id, from: this.sessionUsed.get(sessionId), done: false };
       this.compactions.set(sessionId, compaction);
+      // What it keeps of the room's rules is its summary's to say: they are said again.
+      this.rules.forget(sessionId);
     }
     const facts = compactionFacts(update);
     if (facts.from !== undefined) compaction.from = facts.from;
@@ -1549,6 +1568,7 @@ export class Bridge {
     const lately = last?.finished !== undefined && Date.now() - Date.parse(last.finished.at) < 5000;
     if (last !== undefined && (last.finished === undefined || lately)) return;
     this.compactions.set(sessionId, { id: `said-${Date.now()}`, from: this.sessionUsed.get(sessionId), done: true });
+    this.rules.forget(sessionId);
   }
 
   /** A compaction done: its agent's last, counted in the turn it was in, and the copy sent. */
