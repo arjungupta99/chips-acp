@@ -6,7 +6,7 @@
  *   with its cost, and `end_turn`;
  * - `ask`: it asks permission to run `npm test`, and says which option it was given; `ask edit`,
  *   the same to edit `notes.md`; `ask shell`, the same as Claude Code asks for a command: titled by
- *   the command, with its own words for it in `description`;
+ *   the command, with its own words for it in `description` (`ask shell <command>` for another);
  * - `form`: it asks with a form which colour, and says the answer;
  * - `slow`: it waits until cancelled;
  * - `nothing`: it says `NO_REPLY`;
@@ -318,8 +318,8 @@ export function fakeAgent(
           reply("end_turn");
           return;
         }
-        if (last === "ask shell") {
-          const command = "grep -noE 'card-(front|back)' game.js | sort | uniq -c";
+        if (last.startsWith("ask shell")) {
+          const command = last.slice("ask shell".length).trim() || "grep -noE 'card-(front|back)' game.js | sort | uniq -c";
           const answer = await ask("session/request_permission", {
             sessionId,
             toolCall: {

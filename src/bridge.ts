@@ -2057,8 +2057,8 @@ function lowerFirst(text: string): string {
   return text.length === 0 ? text : `${text[0]?.toLowerCase() ?? ""}${text.slice(1)}`;
 }
 
-/** The most an approval's question holds. */
-const QUESTION_MAX = 300;
+/** The most an approval's question holds: the protocol's `maxLength`, past which the ask is refused. */
+const QUESTION_MAX = 200;
 
 /**
  * An approval's question. Where the agent says what the call does in its own words (Claude Code's

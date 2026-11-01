@@ -695,6 +695,21 @@ describe("what it asks", () => {
     assert.equal(words.payload["text"], "Given: once");
   });
 
+  it("asks a command too long for the question as the protocol takes it, cut short in its span", async () => {
+    // Claude Code's own on 1 November, which 1.0.9 asked in 300 characters and Chips refused.
+    const command = `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu --window-size=1200,4200 --screenshot=/tmp/gshot.png file:///Users/someone/chips-acp/claude-code/miro/room/report.html 2>/dev/null; ls -la /tmp/gshot.png`;
+    const { chips } = await rig();
+    await chips.say(`ask shell ${command}`);
+    const asked = await sent(chips, "approval.request");
+    const question = String(asked.payload["question"]);
+    assert.equal(question.length, 200);
+    assert.ok(question.startsWith('Count class names in game.js? `"/Applications/Google Chrome.app/'));
+    assert.ok(question.endsWith("…`"));
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: once");
+  });
+
   it("words a question from the call's own description, else from its title", () => {
     const command = "node --check game.js && echo ok";
     assert.equal(questionFor(command, { command, description: "Syntax-check game.js." }), `Syntax-check game.js? \`${command}\``);
@@ -716,17 +731,17 @@ describe("what it asks", () => {
     assert.equal(questionFor("Fetch the page", undefined), "Allow it to fetch the page?");
   });
 
-  it("cuts a long command short inside its span, and keeps every question to 300 characters", () => {
+  it("cuts a long command short inside its span, and keeps every question to 200 characters", () => {
     const long = `grep -n ${"x".repeat(400)} game.js`;
     const question = questionFor(long, { command: long, description: "Look for the long word" });
-    assert.equal(question.length, 300);
+    assert.equal(question.length, 200);
     assert.match(question, /^Look for the long word\? `grep -n x+…`$/);
     // Words that fill the question leave no room for the command.
-    const words = "Check ".repeat(60).trim();
+    const words = "Check ".repeat(40).trim();
     const filled = questionFor(long, { command: long, description: words });
-    assert.equal(filled.length, 300);
+    assert.equal(filled.length, 200);
     assert.match(filled, /…\?$/);
-    assert.equal(questionFor(long, { command: long }).length, 300);
+    assert.equal(questionFor(long, { command: long }).length, 200);
   });
 
   it("gives the agent its always when a person allows always for what is not a command", async () => {
