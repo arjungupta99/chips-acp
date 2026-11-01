@@ -19,6 +19,7 @@ import {
   type KindConfig,
   lookAgainGoal,
   lookAgainPrompt,
+  questionFor,
   titleFrom,
 } from "../src/bridge.ts";
 import { type FakeAgent, fakeAgent } from "./fake-agent.ts";
@@ -677,6 +678,55 @@ describe("what it asks", () => {
     const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
     // Chips remembers how the command starts and answers the next one itself.
     assert.equal(words.payload["text"], "Given: once");
+  });
+
+  it("asks a command in the agent's own words where it gives them, the command after in mono", async () => {
+    const { chips } = await rig();
+    await chips.say("ask shell");
+    const asked = await sent(chips, "approval.request");
+    assert.equal(
+      asked.payload["question"],
+      "Count class names in game.js? `grep -noE 'card-(front|back)' game.js | sort | uniq -c`",
+    );
+    const preview = asked.payload["preview"] as { body: string };
+    assert.match(preview.body, /"description": "Count class names in game.js"/);
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: once");
+  });
+
+  it("words a question from the call's own description, else from its title", () => {
+    const command = "node --check game.js && echo ok";
+    assert.equal(questionFor(command, { command, description: "Syntax-check game.js." }), `Syntax-check game.js? \`${command}\``);
+    // Claude Code's own fields on one line; a command in an argv, as Codex gives one.
+    assert.equal(
+      questionFor("ls", { command: "ls -a\n  && pwd", description: "  List the folder\nand where it is  " }),
+      "List the folder and where it is? `ls -a && pwd`",
+    );
+    assert.equal(questionFor("x", { command: ["git", "status"], description: "Show changes" }), "Show changes? `git status`");
+    // Words with no command, as a subagent's call has.
+    assert.equal(questionFor("Task", { description: "Find the tests", prompt: "…" }), "Find the tests?");
+    // A command with a backtick of its own is left to the preview.
+    assert.equal(questionFor("x", { command: "echo `date`", description: "Print the date" }), "Print the date?");
+    // No words of its own, or only blank ones: the title, as before.
+    assert.equal(questionFor("Run npm test", { command: "npm test" }), "Allow it to run npm test?");
+    assert.equal(questionFor("Run npm test", { command: "npm test", description: " \n " }), "Allow it to run npm test?");
+    assert.equal(questionFor("Run npm test", { command: "npm test", description: "..." }), "Allow it to run npm test?");
+    assert.equal(questionFor("Run npm test", { command: "npm test", description: 7 }), "Allow it to run npm test?");
+    assert.equal(questionFor("Fetch the page", undefined), "Allow it to fetch the page?");
+  });
+
+  it("cuts a long command short inside its span, and keeps every question to 300 characters", () => {
+    const long = `grep -n ${"x".repeat(400)} game.js`;
+    const question = questionFor(long, { command: long, description: "Look for the long word" });
+    assert.equal(question.length, 300);
+    assert.match(question, /^Look for the long word\? `grep -n x+…`$/);
+    // Words that fill the question leave no room for the command.
+    const words = "Check ".repeat(60).trim();
+    const filled = questionFor(long, { command: long, description: words });
+    assert.equal(filled.length, 300);
+    assert.match(filled, /…\?$/);
+    assert.equal(questionFor(long, { command: long }).length, 300);
   });
 
   it("gives the agent its always when a person allows always for what is not a command", async () => {

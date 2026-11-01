@@ -1895,7 +1895,7 @@ export class Bridge {
     const input = call["rawInput"];
     const asked = turn.run.approval({
       action: { kind: `acp.${slugOf(kind)}`, input: input ?? {} },
-      question: `Allow it to ${lowerFirst(title)}?`.slice(0, 300),
+      question: questionFor(title, input),
       lasts: "once",
       risk: riskOf(kind),
       ...(input === undefined
@@ -2055,6 +2055,37 @@ function slugOf(word: string): string {
 
 function lowerFirst(text: string): string {
   return text.length === 0 ? text : `${text[0]?.toLowerCase() ?? ""}${text.slice(1)}`;
+}
+
+/** The most an approval's question holds. */
+const QUESTION_MAX = 300;
+
+/**
+ * An approval's question. Where the agent says what the call does in its own words (Claude Code's
+ * `description`), those words are the question and its command follows in a `code` span, which
+ * Chips draws in mono: "Syntax-check game.js? `node --check game.js`". Else "Allow it to" and the
+ * call's title. A command too long for what is left is cut short; the preview holds all of it.
+ */
+export function questionFor(title: string, input: unknown): string {
+  const fields = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {};
+  const said = oneLine(fields["description"])?.replace(/[\s.?!:;,]+$/, "");
+  if (said === undefined || said === "") return `Allow it to ${lowerFirst(title)}?`.slice(0, QUESTION_MAX);
+  const asked = `${clip(said, QUESTION_MAX - 1)}?`;
+  const command = oneLine(Array.isArray(fields["command"]) ? fields["command"].join(" ") : fields["command"]);
+  // A command with a backtick of its own can't sit in a span.
+  const room = QUESTION_MAX - asked.length - 3;
+  if (command === undefined || command.includes("`") || room < 12) return asked;
+  return `${asked} \`${clip(command, room)}\``;
+}
+
+/** A string on one line, where it is one and isn't blank. */
+function oneLine(value: unknown): string | undefined {
+  const line = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return line === "" ? undefined : line;
+}
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
 /** Chips's closed risk classes, for the kinds of call that fit one. */

@@ -5,7 +5,8 @@
  * - anything else: a thought, a tool call that reads a file, two chunks of words, a usage update
  *   with its cost, and `end_turn`;
  * - `ask`: it asks permission to run `npm test`, and says which option it was given; `ask edit`,
- *   the same to edit `notes.md`;
+ *   the same to edit `notes.md`; `ask shell`, the same as Claude Code asks for a command: titled by
+ *   the command, with its own words for it in `description`;
  * - `form`: it asks with a form which colour, and says the answer;
  * - `slow`: it waits until cancelled;
  * - `nothing`: it says `NO_REPLY`;
@@ -309,6 +310,26 @@ export function fakeAgent(
             options: [
               { optionId: "once", name: "Allow once", kind: "allow_once" },
               { optionId: "always", name: "Always allow", kind: "allow_always" },
+              { optionId: "no", name: "Reject", kind: "reject_once" },
+            ],
+          });
+          const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+          say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
+          reply("end_turn");
+          return;
+        }
+        if (last === "ask shell") {
+          const command = "grep -noE 'card-(front|back)' game.js | sort | uniq -c";
+          const answer = await ask("session/request_permission", {
+            sessionId,
+            toolCall: {
+              toolCallId: "t4",
+              title: command,
+              kind: "execute",
+              rawInput: { command, description: "Count class names in game.js" },
+            },
+            options: [
+              { optionId: "once", name: "Allow once", kind: "allow_once" },
               { optionId: "no", name: "Reject", kind: "reject_once" },
             ],
           });

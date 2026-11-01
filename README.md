@@ -147,7 +147,7 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 | Context gauge, cost | `usage_update` (`used`/`size`; `cost` in USD, the turn's share) |
 | The reply | `agent_message_chunk`s gathered into one message; `NO_REPLY` alone is the turn passed |
 | Files in the reply | each `MEDIA:<path>` line of the reply sent as an upload with its words, only from the agent's folder (`sendAnswer`); the post says why one could not go |
-| Approval card | `session/request_permission`; allowed always picks `allow_always`, except for a command, which picks `allow_once` since Chips remembers it by how each part starts (Chips ADR 0239); no picks `reject_once`; Stop answers `cancelled`; the card hears how the call went |
+| Approval card | `session/request_permission`, asked in the agent's own words where the call has a `description` (Claude Code's commands: "Syntax-check game.js? `node --check game.js`"), else "Allow it to" and the call's title; allowed always picks `allow_always`, except for a command, which picks `allow_once` since Chips remembers it by how each part starts (Chips ADR 0239); no picks `reject_once`; Stop answers `cancelled`; the card hears how the call went |
 | Question card | `elicitation/create` form of up to four choice or yes/no fields; anything else is declined |
 | Stop | `session/cancel` |
 | Steer | the next prompt of the same run, after `session/cancel` when it interrupts |
@@ -216,7 +216,10 @@ it kept. The scratch Chips, the link and the run come from Chips's `tools/connec
 ## Release
 
 `npm run release` builds `dist/main.js`, one file with the SDK and everything else bundled in, and
-`dist/THIRD-PARTY-NOTICES.md` beside it; runs the tests; and packs `chipschat-acp-<version>.tgz`. `npm publish`
-publishes it. A version's major is the Chips protocol it speaks, and Chips's card names that major
+`dist/THIRD-PARTY-NOTICES.md` beside it; runs the tests; and packs `chipschat-acp-<version>.tgz`. To
+publish, put the new version in `package.json` (`npm version <version> --no-git-tag-version`), commit
+it and push to `main`: GitHub's Publish workflow (`.github/workflows/publish.yml`) tests it and
+publishes it to npm, which trusts that workflow, so nobody signs in. Don't also run `npm publish`:
+the two race. A version's major is the Chips protocol it speaks, and Chips's card names that major
 (Chips ADR 0218): a fix is a minor or a patch, and reaches every card of its major the day it is
 published.
