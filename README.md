@@ -8,8 +8,8 @@ runs the agent's process, so the bridge is the harness (Chips ADR 0041), built o
 Phase 4 of Chips's `docs/proposals/open-source-harnesses-plan.md`, and Chips's
 `docs/proposals/acp-agents-made-from-chips-plan.md`.
 
-Local only: no remote, nothing published. The `@chipschat/*` packages come from `vendor/`, packed from
-the Chips repo with `pnpm release:sdk`.
+The `@chipschat/*` SDK packages come from npm, at the version `package.json` pins, and the build
+bundles them into `dist/main.js`.
 
 ## From Chips's gallery
 
