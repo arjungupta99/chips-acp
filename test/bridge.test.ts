@@ -605,6 +605,8 @@ describe("a room from the +", () => {
     const session = state.sessions[`${milo.key}|${spaceId}`] ?? "";
     assert.equal(agent.cwds.get(session), milo.folder);
     assert.match(agent.prompts.at(-1) ?? "", /: Plan a weekend in Lisbon for two$/);
+    // Told of the room on its first turn, as Chips wrote it for the harness (Chips ADR 0092's addendum).
+    assert.match(agent.prompts.at(-1) ?? "", /In this space: .*and you, Milo/);
     const started = await sent(chips, "run.started", (event) => event.space_id === spaceId);
     assert.equal(started.payload["goal"], "Plan a weekend in Lisbon for two");
   });

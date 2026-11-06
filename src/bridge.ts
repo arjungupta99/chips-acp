@@ -46,13 +46,14 @@ import type {
   SpaceAsked,
 } from "@chipschat/harness";
 import {
+  firstTurnOf,
   heldNote,
   promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
-  SessionRules,
   sendAnswer,
+  SessionRules,
 } from "@chipschat/harness";
 import {
   type AgentAsked,
@@ -635,15 +636,19 @@ export class Bridge {
         return made;
       }));
     this.log(`${agent.name} claimed ${spaceId}, in ${record.folder}`);
-    // The first words are the ask's, not heard again as a message: said to the agent as one.
-    const message = {
-      type: "message.new",
-      space_id: spaceId,
-      message_id: firstMessage.messageId,
-      text: firstMessage.text,
-      from: { participant_id: asked.askedBy, kind: "person", display_name: await this.whoSaid(asked), role: "member" },
-      for: [agent.agentId],
-    } as unknown as MessageNew;
+    // The first words are the ask's, not heard again as a message: said to the agent as one, with
+    // the room's note Chips wrote for the harness before the agent was made (Chips ADR 0092's
+    // addendum), or alone when they were read from the room's history.
+    const message =
+      firstTurnOf(asked, agent.agentId) ??
+      ({
+        type: "message.new",
+        space_id: spaceId,
+        message_id: firstMessage.messageId,
+        text: firstMessage.text,
+        from: { participant_id: asked.askedBy, kind: "person", display_name: await this.whoSaid(asked), role: "member" },
+        for: [agent.agentId],
+      } as unknown as MessageNew);
     const room = this.roomOf(record, spaceId);
     room.queue.push({ message, speakerId: agent.agentId });
     void this.pump(room);
