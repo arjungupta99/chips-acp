@@ -65,6 +65,11 @@ describe("where things are kept", () => {
     assert.equal(configPathOf("~/.chips-acp/claude-code.json", home), at(".chips-acp/claude-code.json"));
   });
 
+  it("uses the old place while what a kind keeps is there, with no config of its own", () => {
+    put(".chips-acp/codex/state.json", "{}");
+    assert.equal(configPathOf("~/Chips/.bridges/acp/codex.json", home), at(".chips-acp/codex.json"));
+  });
+
   it("gives a new kind its folders in ~/Chips/Agents", () => {
     assert.equal(readConfig(at("Chips/.bridges/acp/codex.json")).folders, at("Chips/Agents/codex"));
   });

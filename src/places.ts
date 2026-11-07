@@ -65,14 +65,17 @@ export function configTargetOf(word: string | undefined, home: string = homedir(
 
 /**
  * A kind's config, named by a word or the default, as a whole path in the place it is now: the new
- * place, unless its file is still in the old one and not yet in the new.
+ * place, unless the kind's config or what it keeps is still in the old one and neither is in the new.
+ * Claude Code's and Codex's need no config, so what it keeps counts as much as the file.
  */
 export function configPathOf(word: string | undefined, home: string = homedir()): string {
   const places = placesOf(home);
   const target = configTargetOf(word, home);
   const under = inside(places.settings, target);
-  const old = under === undefined ? undefined : join(places.oldSettings, under);
-  return old !== undefined && existsSync(old) && !existsSync(target) ? old : target;
+  if (under === undefined) return target;
+  const old = join(places.oldSettings, under);
+  const kept = (path: string) => existsSync(path) || existsSync(path.replace(/\.json$/, ""));
+  return kept(old) && !kept(target) ? old : target;
 }
 
 /** An agents' folder a config names, as a whole path in the place it is now. */
