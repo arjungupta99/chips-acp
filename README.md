@@ -16,7 +16,7 @@ bundles them into `dist/main.js`.
 The card's line is `CHIPS_JOIN_LINK='<link>' chips connect claude-code` or `CHIPS_JOIN_LINK='<link>' chips connect codex` (Chips ADR 0218). It downloads this bridge as the npm package
 `@chipschat/acp`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
 that Chips carries, so the machine needs no Node or npm of its own. The bridge checks the agent's ACP adapter and its sign-in,
-joins, and keeps itself running from login. `chips disconnect claude-code` or `chips disconnect codex` stops it. Claude Code and Codex share this one package: their cards hand it `~/.chips-acp/claude-code.json` or `codex.json`, and the file's name picks the kind. On another computer,
+joins, and keeps itself running from login. `chips disconnect claude-code` or `chips disconnect codex` stops it. Claude Code and Codex share this one package: their cards hand it `~/Chips/.bridges/acp/claude-code.json` or `codex.json`, and the file's name picks the kind. On another computer,
 `curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect claude-code` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
 
@@ -25,7 +25,7 @@ first. The steps below run the bridge from this checkout instead, to work on it.
 ```bash
 npm install -g @agentclientprotocol/claude-agent-acp   # or @agentclientprotocol/codex-acp
 npm install
-CHIPS_JOIN_LINK='<a join link made in Chips>' npm run keep ~/.chips-acp/claude-code.json
+CHIPS_JOIN_LINK='<a join link made in Chips>' npm run keep ~/Chips/.bridges/acp/claude-code.json
 ```
 
 `npm run keep` joins, then keeps the bridge running from login ("Keep it running", below);
@@ -35,7 +35,7 @@ The link comes from Chips's gallery (Agents → Connect a harness → Claude Cod
 line with the link in it (`codex.json` for Codex) and starts the link with what it needs on:
 `agents`, `new_spaces`, `new_agents`, `forks` and `restarts`. `claude-code.json` and `codex.json`
 need not be there: without them the bridge runs Claude Code or Codex, in the mode that asks (see
-"Asking a person"), with each agent's folder under `~/chips-acp/claude-code` or `~/chips-acp/codex`.
+"Asking a person"), with each agent's folder under `~/Chips/Agents/claude-code` or `~/Chips/Agents/codex`.
 
 Before it takes the link up, which works once, it checks:
 - the config is there, or is one of those two;
@@ -49,24 +49,35 @@ room once, which the card waits for; a new link from Chips replaces the key it k
 link, set `CHIPS_URL` and allow the code it prints from Chips. Its key is kept as `join()` keeps
 one (the keychain, under the kind's name); its cursor, unanswered events, unended runs, its agents
 and which session each of their rooms is are kept in a folder beside the config, named after it
-(`~/.chips-acp/claude-code/`), so a restart picks up where it was. Each start logs whether the
+(`~/Chips/.bridges/acp/claude-code/`), so a restart picks up where it was. Each start logs whether the
 agent says it is signed in, and a turn it refuses for that says how to sign in.
 
 The config names one kind:
 
 ```json
-{ "name": "Claude Code", "command": ["claude-agent-acp"], "mode": "default", "folders": "~/chips-acp/claude-code" }
+{ "name": "Claude Code", "command": ["claude-agent-acp"], "mode": "default", "folders": "~/Chips/Agents/claude-code" }
 ```
 
 - `name` is the harness's name in Chips, and its own agent's.
 - `command` is how the agent speaks ACP over stdio: `["claude-agent-acp"]`, `["codex-acp"]`,
   `["goose", "acp"]`, `["gemini", "--acp"]`, `["opencode", "acp"]`.
-- `folders` is where each agent gets a folder of its own, named after it (`~/chips-acp/claude-code/nova`),
+- `folders` is where each agent gets a folder of its own, named after it (`~/Chips/Agents/claude-code/nova`),
   made empty. A copy from Fork works on in its original's folder, with the files the conversation it
   remembers expects. A deleted agent's folder stays.
 - `folder`, in its place, puts every agent in one folder: a repository they work on together.
 - `mode` is the mode its sessions are put in, of those the agent offers (see below). `env` adds to
   its environment.
+
+Everything it keeps is under `~/Chips` (Chips ADR 0283): the configs and what each kind keeps in
+`~/Chips/.bridges/acp`, the agents' folders in `~/Chips/Agents`. Until 1.0.13 they were
+`~/.chips-acp` and `~/chips-acp`. A kind moves what it had there the first time 1.0.13 starts: its
+config and what it keeps, its agents' folders (where its config named the old place, or nothing),
+the folder paths it saved, and Claude Code's own store for each folder that moved
+(`~/.claude/projects/<the folder's path, dashed>`), which holds the folder's conversations and memory.
+It renames and never copies; where something is at the new place already it moves in what isn't
+there yet and says in its log what it left. A config path in the old place, from an older Chips's
+card or a login item kept before, is read in the new one, and the login item is kept with the new
+path.
 
 Installing any other agent and signing it in to a model is done the agent's own way, before it is
 named here. A second kind is a second config, and a second bridge beside the first.
@@ -167,7 +178,7 @@ where the harness is granted `context_files`, `models` and `context_windows`.
 | Chips | Claude Code | Codex | Another kind |
 |---|---|---|---|
 | Context: its own files | its folder's `CLAUDE.md`, and `CLAUDE.local.md`, `.claude/CLAUDE.md` and `.claude/rules/*.md` where they are; its memory, `~/.claude/projects/<its folder>/memory/MEMORY.md`, which Claude Code writes too. A person may change each, and one not there yet shows empty | its folder's `AGENTS.override.md`, else its `AGENTS.md`; a person may change it | none |
-| Context: shared | `~/chips-acp/claude-code/CLAUDE.md`, read by every agent, changed on the harness's page; files above the agents' folders and `~/.claude/CLAUDE.md`, shown and not changed, since they aren't only these agents' | `~/.codex/AGENTS.override.md`, else `~/.codex/AGENTS.md`, shown and not changed | none |
+| Context: shared | `~/Chips/Agents/claude-code/CLAUDE.md`, read by every agent, changed on the harness's page; files above the agents' folders and `~/.claude/CLAUDE.md`, shown and not changed, since they aren't only these agents' | `~/.codex/AGENTS.override.md`, else `~/.codex/AGENTS.md`, shown and not changed | none |
 | When it reads them | when a session starts; an edit closes the agent's sessions before its next turn and loads them again, so it applies from the next message | the same | |
 | Context window | `usage_update` of the agent's session that said last; the window from the update that ends a turn (it carries the cost), as one before may be a default | `usage_update` | `usage_update` |
 | Compact now | `/compact` said to that session as a turn of its own, after any turn going there; its words go nowhere; from and to from its tool call's `rawOutput` | the same; to from the `usage_update` it sends as it finishes | where it lists `compact` among its commands |

@@ -33,10 +33,10 @@ describe("before the link is taken up", () => {
   it("needs no config for Claude Code or Codex, as the gallery's cards name them", () => {
     const claude = readConfig(join(folder, "nowhere", "claude-code.json"));
     assert.deepEqual([claude.name, claude.command, claude.mode], ["Claude Code", ["claude-agent-acp"], "default"]);
-    assert.match(claude.folders, /\/chips-acp\/claude-code$/);
+    assert.match(claude.folders, /\/Chips\/Agents\/claude-code$/);
     const codex = readConfig(join(folder, "nowhere", "codex.json"));
     assert.deepEqual([codex.name, codex.command, codex.mode], ["Codex", ["codex-acp"], "workspace-write"]);
-    assert.match(codex.folders, /\/chips-acp\/codex$/);
+    assert.match(codex.folders, /\/Chips\/Agents\/codex$/);
   });
 
   it("says how to install a known kind's adapter", () => {

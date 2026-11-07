@@ -6,35 +6,39 @@
  * beside it.
  *
  * The config is JSON (Claude Code's and Codex's need none: `claude-code.json` and `codex.json` are theirs):
- * `{ "name": "Claude Code", "command": ["claude-agent-acp"], "mode": "default", "folders": "~/chips-acp/claude-code" }`,
- * `~/.chips-acp/config.json` unless a path is given. What it keeps is in a folder beside it, named
- * after it (`~/.chips-acp/claude-code/` for `claude-code.json`): the SDK's state (cursor,
- * unanswered events, runs not ended), and its agents and which session each of their rooms is.
+ * `{ "name": "Claude Code", "command": ["claude-agent-acp"], "mode": "default", "folders": "~/Chips/Agents/claude-code" }`,
+ * `~/Chips/.bridges/acp/config.json` unless a path is given. What it keeps is in a folder beside it,
+ * named after it (`~/Chips/.bridges/acp/claude-code/` for `claude-code.json`): the SDK's state
+ * (cursor, unanswered events, runs not ended), and its agents and which session each of their rooms
+ * is. An install from before 1.0.13, in `~/.chips-acp` and `~/chips-acp`, is moved there first
+ * (`move.ts`, Chips ADR 0283).
  *
  * `npm run keep [config]` is the same, then keeps the bridge running from login (`keep.ts`), as
  * the launch agent `chat.chips.acp.<config's name>`.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { adapterEnv, knownIdOf } from "./kinds.js";
+import { moveOld } from "./move.js";
+import { configPathOf, configTargetOf } from "./places.js";
 import { checkCommand, checkSignIn, readConfig, SetupError } from "./setup.js";
 import { VERSION } from "./version.js";
 
-const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
-const configPath = resolve(home(words[0] ?? "~/.chips-acp/config.json"));
-const LABEL = `chat.chips.acp.${basename(configPath, ".json")}`;
+const LABEL = `chat.chips.acp.${basename(configTargetOf(words[0]), ".json")}`;
 stopIfAsked(LABEL);
+const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
+// What it kept before 1.0.13, brought across to ~/Chips first, so everything after reads it there.
+moveOld(configTargetOf(words[0]), log);
+const configPath = configPathOf(words[0]);
 // What it needs, checked before a link is taken up, which works once.
 let kind: KindConfig;
-const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 try {
   kind = readConfig(configPath);
   mkdirSync(kind.folder ?? kind.folders, { recursive: true });

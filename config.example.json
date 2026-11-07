@@ -2,5 +2,5 @@
   "name": "Claude Code",
   "command": ["claude-agent-acp"],
   "mode": "default",
-  "folders": "~/chips-acp/claude-code"
+  "folders": "~/Chips/Agents/claude-code"
 }

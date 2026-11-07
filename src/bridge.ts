@@ -127,7 +127,7 @@ export interface KindConfig {
    * Chips as cards; their own modes (`auto`, `agent`) let the agent decide. Its own when absent.
    */
   readonly mode?: string | undefined;
-  /** Where each agent gets a folder of its own, named after it: `~/chips-acp/claude-code`. */
+  /** Where each agent gets a folder of its own, named after it: `~/Chips/Agents/claude-code`. */
   readonly folders: string;
   /** One folder every agent works in, in the place of one each: a repository they share. */
   readonly folder?: string | undefined;

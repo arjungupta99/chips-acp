@@ -19,7 +19,7 @@
  * their own Claude Code or Codex reads too, so it is shown and not changed here.
  *
  * Chips takes an agent's file named as a shared one as given in its place. The agent reads both,
- * so a file of the harness's set is named by where it is (`~ › chips-acp › claude-code › CLAUDE.md`)
+ * so a file of the harness's set is named by where it is (`~ › Chips › Agents › claude-code › CLAUDE.md`)
  * and an agent's by where it is in its folder (`CLAUDE.md`), and no name is in both.
  */
 
@@ -148,7 +148,7 @@ export class ContextFiles {
     private readonly docBytes: number,
   ) {}
 
-  /** `~/chips-acp/claude-code/CLAUDE.md`, or the whole path where it isn't in the home. */
+  /** `~/Chips/Agents/claude-code/CLAUDE.md`, or the whole path where it isn't in the home. */
   private tilde(path: string): string {
     const { home } = this.places;
     return within(path, home) ? `~${path.slice(home.length)}` : path;

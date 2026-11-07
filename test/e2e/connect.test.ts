@@ -70,11 +70,11 @@ describe("ACP's card, from a link to its hello", { skip, timeout: 180_000 }, () 
       /Claude Code's command, claude-agent-acp, isn't on this machine's PATH: install it with `npm install -g @agentclientprotocol\/claude-agent-acp`/,
       bare,
     );
-    mkdirSync(join(home, ".chips-acp"));
+    mkdirSync(join(home, "Chips", ".bridges", "acp"), { recursive: true });
     const config = (env: Record<string, string>) =>
       writeFileSync(
-        join(home, ".chips-acp", "claude-code.json"),
-        JSON.stringify({ name: "Claude Code", command: [AGENT], folders: "~/chips-acp/claude-code", env }),
+        join(home, "Chips", ".bridges", "acp", "claude-code.json"),
+        JSON.stringify({ name: "Claude Code", command: [AGENT], folders: "~/Chips/Agents/claude-code", env }),
       );
     config({});
     await stopped(card.command, new RegExp(`Claude Code's command, ${AGENT}, isn't on this machine's PATH`));

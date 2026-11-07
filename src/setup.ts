@@ -6,12 +6,12 @@
  */
 
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 import type { StopWords } from "@chipschat/harness";
 import { AcpClient, type AgentInfo, type AuthStatus, isAuthRequired, notOffered, type Wire } from "./acp.js";
 import type { KindConfig } from "./bridge.js";
 import { installWords, knownConfig, notInstalledStop, signedOutStop, signedOutWords } from "./kinds.js";
+import { foldersPathOf, fromHome } from "./places.js";
 import { VERSION } from "./version.js";
 
 /**
@@ -30,9 +30,7 @@ export class SetupError extends Error {
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
 
-const EXAMPLE = '{ "name": "Claude Code", "command": ["claude-agent-acp"], "folders": "~/chips-acp/claude-code" }';
-
-const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
+const EXAMPLE = '{ "name": "Claude Code", "command": ["claude-agent-acp"], "folders": "~/Chips/Agents/claude-code" }';
 
 /** The kind of agent the config at `path` names: Claude Code's or Codex's own, by its file's name, when it isn't there. */
 export function readConfig(path: string): KindConfig {
@@ -52,8 +50,8 @@ export function readConfig(path: string): KindConfig {
   return {
     name,
     command: command.map(String),
-    folders: resolve(home(typeof raw["folders"] === "string" ? raw["folders"] : `~/chips-acp/${slug}`)),
-    ...(typeof raw["folder"] === "string" ? { folder: resolve(home(raw["folder"])) } : {}),
+    folders: foldersPathOf(typeof raw["folders"] === "string" ? raw["folders"] : `~/Chips/Agents/${slug}`),
+    ...(typeof raw["folder"] === "string" ? { folder: foldersPathOf(raw["folder"]) } : {}),
     ...(typeof raw["mode"] === "string" ? { mode: raw["mode"] } : {}),
     ...(typeof raw["env"] === "object" && raw["env"] !== null ? { env: raw["env"] as Record<string, string> } : {}),
   };
@@ -74,7 +72,7 @@ export function checkCommand(kind: KindConfig, env: NodeJS.ProcessEnv = process.
   if (program === undefined) throw new SetupError(`${kind.name} has no command to run. ${STILL_GOOD}`);
   const path = { ...env, ...kind.env }["PATH"] ?? "";
   const found = program.includes("/")
-    ? runnable(isAbsolute(program) ? program : resolve(home(program)))
+    ? runnable(isAbsolute(program) ? program : resolve(fromHome(program)))
     : path.split(delimiter).some((dir) => dir !== "" && runnable(join(dir, program)));
   if (!found) {
     throw new SetupError(
