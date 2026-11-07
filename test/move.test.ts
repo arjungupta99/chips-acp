@@ -68,6 +68,10 @@ describe("where things are kept", () => {
   it("gives a new kind its folders in ~/Chips/Agents", () => {
     assert.equal(readConfig(at("Chips/.bridges/acp/codex.json")).folders, at("Chips/Agents/codex"));
   });
+  it("keeps a kind's folders where they were until they move", () => {
+    put("chips-acp/codex/lionel/notes.txt", "Lionel's\n");
+    assert.equal(readConfig(at("Chips/.bridges/acp/codex.json")).folders, at("chips-acp/codex"));
+  });
 });
 
 describe("an install from before 1.0.13", () => {

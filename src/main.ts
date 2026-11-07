@@ -22,7 +22,7 @@ import { basename, dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
-import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { adapterEnv, knownIdOf } from "./kinds.js";
 import { moveOld } from "./move.js";
 import { configPathOf, configTargetOf } from "./places.js";
@@ -34,8 +34,9 @@ const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 const LABEL = `chat.chips.acp.${basename(configTargetOf(words[0]), ".json")}`;
 stopIfAsked(LABEL);
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
-// What it kept before 1.0.13, brought across to ~/Chips first, so everything after reads it there.
-moveOld(configTargetOf(words[0]), log);
+// What it kept before 1.0.13, brought across to ~/Chips first, so everything after reads it
+// there; by the kept copy, where this run hands over to one (`handsOver`).
+if (!handsOver) moveOld(configTargetOf(words[0]), log);
 const configPath = configPathOf(words[0]);
 // What it needs, checked before a link is taken up, which works once.
 let kind: KindConfig;

@@ -14,6 +14,8 @@ import { checkCommand, checkSignIn, readConfig, SetupError, STILL_GOOD } from ".
 import { fakeAgent } from "./fake-agent.ts";
 
 const folder = mkdtempSync(join(tmpdir(), "chips-acp-setup-"));
+// A home of the test's own: where a kind's folders go by default depends on what is in it.
+process.env["HOME"] = folder;
 const bin = join(folder, "bin");
 const config = join(folder, "claude-code.json");
 writeFileSync(config, JSON.stringify({ name: "Claude Code", command: ["claude-agent-acp"], folders: join(folder, "rooms") }));
