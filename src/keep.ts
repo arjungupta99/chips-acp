@@ -27,6 +27,9 @@ export const words = flags.filter((word) => !word.startsWith("--"));
  */
 export const handsOver = flags.includes("--keep");
 
+/** Whether this run was asked to stop what it kept (`chips disconnect`). */
+export const stopping = flags.includes("--stop");
+
 /**
  * A word as a whole path, for the kept copy, which runs from elsewhere: a config named in the old
  * place, by an older Chips's card, is kept with its path in the new one, where the kept copy moves it

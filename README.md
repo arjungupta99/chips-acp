@@ -15,7 +15,7 @@ bundles them into `dist/main.js`.
 
 The card's line is `CHIPS_JOIN_LINK='<link>' chips connect claude-code` or `CHIPS_JOIN_LINK='<link>' chips connect codex` (Chips ADR 0218). It downloads this bridge as the npm package
 `@chipschat/acp`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
-that Chips carries, so the machine needs no Node or npm of its own. The bridge checks the agent's ACP adapter and its sign-in,
+that Chips carries, so the machine needs no Node or npm of its own. The agent itself is the person's to install from its maker and to sign in to. The bridge asks for it first, then fetches Codex's ACP adapter when it isn't on the PATH, with the npm Chips carries, into `~/Chips/.bridges/acp/adapters/codex` (Chips ADR 0288). Claude Code's adapter is still installed by hand until Anthropic has said whether a product like Chips may fetch it. The bridge checks the agent's sign-in,
 joins, and keeps itself running from login. `chips disconnect claude-code` or `chips disconnect codex` stops it. Claude Code and Codex share this one package: their cards hand it `~/Chips/.bridges/acp/claude-code.json` or `codex.json`, and the file's name picks the kind. On another computer,
 `curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect claude-code` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.

@@ -21,8 +21,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { processWire } from "./acp.js";
+import { forgetAdapter, readyAdapter, withFetchedAdapter } from "./adapter.js";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
-import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { handsOver, keepIfAsked, stopIfAsked, stopping, words } from "./keep.js";
 import { adapterEnv, knownIdOf } from "./kinds.js";
 import { moveOld } from "./move.js";
 import { configPathOf, configTargetOf } from "./places.js";
@@ -32,6 +33,7 @@ import { VERSION } from "./version.js";
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
 const LABEL = `chat.chips.acp.${basename(configTargetOf(words[0]), ".json")}`;
+if (stopping) forgetAdapter(basename(configTargetOf(words[0]), ".json"));
 stopIfAsked(LABEL);
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 // What it kept before 1.0.13, brought across to ~/Chips first, so everything after reads it
@@ -41,10 +43,11 @@ const configPath = configPathOf(words[0]);
 // What it needs, checked before a link is taken up, which works once.
 let kind: KindConfig;
 try {
-  kind = readConfig(configPath);
+  kind = withFetchedAdapter(readConfig(configPath));
   mkdirSync(kind.folder ?? kind.folders, { recursive: true });
   if (link !== undefined) {
-    reportStep("checking", { detail: `Starting ${kind.name}'s ACP adapter` });
+    reportStep("checking", { detail: `Looking for ${kind.name}` });
+    kind = await readyAdapter(kind, { say: (detail) => reportStep("checking", { detail }) });
     checkCommand(kind);
     log(`checking that ${kind.name} starts and is signed in`);
     const cwd = kind.folder ?? kind.folders;

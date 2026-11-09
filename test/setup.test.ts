@@ -50,9 +50,9 @@ describe("before the link is taken up", () => {
       (error: unknown) => {
         assert.ok(error instanceof SetupError);
         assert.deepEqual(error.words, {
-          detail: "codex-acp isn't on this Mac",
-          says: "Codex's ACP adapter isn't installed.",
-          doing: "Install it with npm, then try again.",
+          detail: "Codex can't join Chips yet",
+          says: "Codex needs one more piece to join Chips.",
+          doing: "Run this in Terminal, then try again. It needs npm, which comes with Node.js (nodejs.org).",
           copy: "npm install -g @agentclientprotocol/codex-acp",
         });
         return true;
@@ -87,7 +87,7 @@ describe("the agent started and signed in, before the link is taken up", () => {
   it("stops when it says it is signed in as nobody, as Claude Code does, with how to sign in", async () => {
     await assert.rejects(
       checkSignIn(kind, fakeAgent({ auth: "out" }).wire(), folder),
-      stopsWith(/^Claude Code isn't signed in on this machine: run `claude`, then \/login in a terminal\./),
+      stopsWith(/^Claude Code isn't signed in on this machine: run `claude auth login` in a terminal\./),
     );
   });
 

@@ -57,7 +57,7 @@ export function readConfig(path: string): KindConfig {
   };
 }
 
-const runnable = (path: string) => {
+export const runnable = (path: string) => {
   try {
     accessSync(path, constants.X_OK);
     return true;
@@ -66,6 +66,9 @@ const runnable = (path: string) => {
   }
 };
 
+/** A program by its name, somewhere on a `PATH`. */
+export const onPath = (program: string, path: string) => path.split(delimiter).some((dir) => dir !== "" && runnable(join(dir, program)));
+
 /** The kind's command found where it will be run from: a path, or a name on its `PATH`. */
 export function checkCommand(kind: KindConfig, env: NodeJS.ProcessEnv = process.env): void {
   const [program] = kind.command;
@@ -73,7 +76,7 @@ export function checkCommand(kind: KindConfig, env: NodeJS.ProcessEnv = process.
   const path = { ...env, ...kind.env }["PATH"] ?? "";
   const found = program.includes("/")
     ? runnable(isAbsolute(program) ? program : resolve(fromHome(program)))
-    : path.split(delimiter).some((dir) => dir !== "" && runnable(join(dir, program)));
+    : onPath(program, path);
   if (!found) {
     throw new SetupError(
       `${kind.name}'s command, ${program}, isn't on this machine's PATH: ${installWords(kind)}. ${STILL_GOOD}`,
@@ -129,7 +132,7 @@ export async function checkSignIn(
     } catch (error) {
       const last = options.stderr?.().slice(-3).join(" ") ?? "";
       throw new SetupError(`${kind.name} didn't start: ${wordsOf(error)}.${last === "" ? "" : ` It said: ${last}`} ${STILL_GOOD}`, {
-        detail: "Its ACP adapter didn't start",
+        detail: "It didn't start",
         says: `${kind.name} didn't start: ${wordsOf(error)}.`,
         ...(last === "" ? {} : { doing: `It said: ${last}` }),
       });
