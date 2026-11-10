@@ -144,7 +144,8 @@ log(`connected as ${chips.harnessId} (${kind.name}), ${Object.keys(state.agents)
 await helloOnce(joined, {
   name: kind.name,
   say: (spaceId) =>
-    chips.post({ spaceId, text: `Hi, ${kind.name} here, through chips-acp. Make me an agent from any space, or ask me here.` }),
+    // In the shape every bridge's hello has: "Hi, I'm …", then what to do (the onboarding audit, item 39).
+    chips.post({ spaceId, text: `Hi, I'm ${kind.name}. Ask me anything here, or make me an agent from any space.` }),
 }).catch((error: unknown) => log(`hello not said: ${String(error)}`));
 
 const stop = () => {

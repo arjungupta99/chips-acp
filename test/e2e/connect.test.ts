@@ -18,7 +18,7 @@ import { STILL_GOOD } from "../../src/setup.ts";
 import { type CardLink, here, type ScratchChips, scratchChips, skip } from "./kit.ts";
 
 const AGENT = "chips-acp-e2e-agent";
-const HELLO = /^Hi, Claude Code here, through chips-acp\. Make me an agent from any space, or ask me here\.$/;
+const HELLO = /^Hi, I'm Claude Code\. Ask me anything here, or make me an agent from any space\.$/;
 const CONNECTED = /connected as hrn_\w+ \(Claude Code\), \d+ agent\(s\)/;
 
 describe("ACP's card, from a link to its hello", { skip, timeout: 180_000 }, () => {
