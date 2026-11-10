@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/acp",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "An agent that speaks the Agent Client Protocol, as a Chips harness of its kind: agents made from Chips, each in a folder of its own, each room a session.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,9 +33,9 @@
     "release": "npm run build && npm test && npm pack"
   },
   "devDependencies": {
-    "@chipschat/conformance": "1.0.3",
-    "@chipschat/harness": "1.0.3",
-    "@chipschat/protocol": "1.0.3",
+    "@chipschat/conformance": "1.0.4",
+    "@chipschat/harness": "1.0.4",
+    "@chipschat/protocol": "1.0.4",
     "@types/node": "22.19.0",
     "esbuild": "0.27.7",
     "tsx": "4.21.0",
