@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
-import { type Chips, connect, SENDING_FILES } from "@chipschat/harness";
+import { type Chips, connect, type Run, SENDING_FILES } from "@chipschat/harness";
 import { type Feedback, messageIdOf, newId } from "@chipschat/protocol";
 import {
   Bridge,
@@ -783,6 +783,241 @@ describe("what a person does to it", () => {
     await chips.asOwner({ type: "run.cancel", space_id: started.space_id, run_id: started.run_id });
     await until(() => agent.cancels.length > 0);
     assert.deepEqual(agent.cancels, agent.made, "the room's session, stopped");
+  });
+
+  it("drops the words an interrupting steer cut off, so the reply is one answer", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("cut");
+    const started = await sent(chips, "run.started");
+    await until(() => agent.prompts.length > 0);
+    // Its answer to the steer is words alone, with no tool call to set what came before aside.
+    await chips.asOwner({ ...runOf(started), type: "run.steer", mode: "interrupt", text: "early" });
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.equal(agent.prompts[1], "Arjun adds: early");
+    assert.deepEqual(postsIn(chips, started.run_id), ["Early."]);
+  });
+});
+
+/** The words to carry on with, as Chips ADR 0293 has them. */
+const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
+
+/** A run's address, for what a person sends it. */
+function runOf(started: StoredEvent): { space_id: string | null; run_id: string | null } {
+  return { space_id: started.space_id, run_id: started.run_id };
+}
+
+/** What a run posted in the room. */
+function postsIn(chips: FakeChips, runId: string | null): unknown[] {
+  return chips.workspace.log
+    .filter((event) => event.type === "message.post" && event.run_id === runId)
+    .map((event) => event.payload["text"]);
+}
+
+/** How a run ended, if it has. */
+function endsOf(chips: FakeChips, runId: string | null): string[] {
+  return chips.workspace.log
+    .filter((event) => (event.type === "run.completed" || event.type === "run.failed") && event.run_id === runId)
+    .map((event) => event.type);
+}
+
+/** A moment for anything the bridge shouldn't do to show up. */
+const quiet = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+/** What the bridge handed its connection's `send`: for a field the fake, a Chips from before, drops before its log. */
+function sendsOf(client: Chips): { type: string; envelope: Record<string, unknown>; payload: Record<string, unknown> }[] {
+  const sends: { type: string; envelope: Record<string, unknown>; payload: Record<string, unknown> }[] = [];
+  const send = client.send.bind(client);
+  client.send = (type, envelope, payload, key) => {
+    sends.push({ type, envelope: { ...envelope }, payload: { ...payload } });
+    return send(type, envelope, payload, key);
+  };
+  return sends;
+}
+
+/**
+ * The SDK's run for a run id, to hand it what a person did as the connection does. For a Pause the
+ * bridge hears while a card of its waits: Chips refuses one of a run it counts as waiting on a card,
+ * and the fake with it, but takes one that reached it first while the card was on its way, and the
+ * bridge hears that Pause after asking.
+ */
+function sdkRun(client: Chips, runId: string | null): Run {
+  const run = (client as unknown as { activeRuns: Map<string, Run> }).activeRuns.get(String(runId));
+  assert.ok(run !== undefined, `the SDK has run ${String(runId)}`);
+  return run;
+}
+
+describe("a person's Pause (Chips ADR 0293)", () => {
+  it("says each run can pause once, as it starts, in the run's envelope, as the agent it is by", async () => {
+    const { chips, client, agentId } = await rig();
+    const sends = sendsOf(client);
+    // Chips names the room's agent: the run is that agent's.
+    await chips.say("hello");
+    const first = await sent(chips, "run.completed");
+    // A second look at a reply the room no longer has names nobody: the run is the harness's own.
+    await feedback(chips, chips.address.spaceId, newId("message"), { kind: "correction", text: "Not that." });
+    const second = await sent(chips, "run.completed", (event) => event.run_id !== first.run_id);
+
+    const said = sends.filter((each) => each.type === "run.status" && each.payload["pausable"] === true);
+    assert.deepEqual(
+      said.map((each) => each.envelope),
+      [
+        { space_id: first.space_id, run_id: first.run_id, actor: { kind: "agent", id: agentId } },
+        { space_id: second.space_id, run_id: second.run_id },
+      ],
+    );
+    for (const each of said) {
+      assert.deepEqual(each.payload, { phase: "thinking", verb_phrase: "Thinking…", pausable: true });
+    }
+    // The fake is a Chips from before ADR 0293: it takes each status, by the run's agent, and drops the word.
+    const thinking = chips.workspace.log.filter(
+      (event) => event.type === "run.status" && event.payload["verb_phrase"] === "Thinking…",
+    );
+    assert.deepEqual(
+      thinking.map((event) => [event.run_id, event.actor.id]),
+      [
+        [first.run_id, agentId],
+        [second.run_id, agentId],
+      ],
+    );
+    assert.ok(chips.workspace.dropped.some((each) => each.type === "run.status" && each.field === "pausable"));
+  });
+
+  it("answers as ever when saying it can pause fails", async () => {
+    const { chips, client, logs } = await rig();
+    const send = client.send.bind(client);
+    client.send = (type, envelope, payload, key) =>
+      payload["pausable"] === true ? Promise.reject(new Error("refused")) : send(type, envelope, payload, key);
+    await chips.say("hello");
+    const done = await sent(chips, "run.completed");
+    assert.equal(done.payload["summary"], "Here is the answer.");
+    assert.ok(logs.some((line) => line === `couldn't say run ${String(done.run_id)} can pause: refused`), logs.join("\n"));
+  });
+
+  it("stops the prompt, posts and ends nothing, and carries on in the same session on Resume", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("cut");
+    const started = await sent(chips, "run.started");
+    await until(() => agent.prompts.length === 1);
+    await chips.asOwner({ ...runOf(started), type: "run.pause" });
+    await until(() => agent.cancels.length === 1);
+    await quiet();
+    assert.equal(agent.prompts.length, 1, "nothing more said to it while paused");
+    assert.deepEqual(postsIn(chips, started.run_id), [], "nothing posted for the half-finished part");
+    assert.deepEqual(endsOf(chips, started.run_id), [], "the run isn't ended");
+
+    await chips.asOwner({ ...runOf(started), type: "run.resume" });
+    const done = await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.deepEqual(agent.prompts.slice(1), [CARRY_ON]);
+    assert.equal(agent.made.length, 1);
+    assert.deepEqual(agent.promptedIn, [agent.made[0], agent.made[0]], "the same session");
+    assert.deepEqual(postsIn(chips, started.run_id), ["Here is the answer."], "one answer");
+    assert.equal(done.payload["summary"], "Here is the answer.");
+  });
+
+  it("ends quietly when a person stops it while it is paused, and takes the next message", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("cut");
+    const started = await sent(chips, "run.started");
+    await until(() => agent.prompts.length === 1);
+    await chips.asOwner({ ...runOf(started), type: "run.pause" });
+    await until(() => agent.cancels.length === 1);
+    await chips.asOwner({ ...runOf(started), type: "run.cancel" });
+    await quiet();
+    assert.equal(agent.prompts.length, 1, "no carry-on");
+    assert.equal(agent.cancels.length, 1, "nothing going to stop a second time");
+    assert.deepEqual(postsIn(chips, started.run_id), []);
+    assert.deepEqual(endsOf(chips, started.run_id), [], "Chips ended it; the bridge says nothing more");
+
+    await chips.say("hello again");
+    const next = await sent(chips, "run.completed", (event) => event.run_id !== started.run_id);
+    assert.deepEqual(postsIn(chips, next.run_id), ["Here is the answer."]);
+  });
+
+  it("holds the first prompt when a Pause lands while the session opens, and sends it as it was on Resume", async () => {
+    let open = (): void => undefined;
+    const opening = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const { chips, client, agent } = await rig({ agent: fakeAgent({ opening }) });
+    await chips.say("hello there");
+    const started = await sent(chips, "run.started");
+    await chips.asOwner({ ...runOf(started), type: "run.pause" });
+    // Heard as the run starts, it can come before the bridge's handlers: the run says it is paused all the same.
+    await until(() => sdkRun(client, started.run_id).paused);
+    open();
+    await until(() => agent.made.length === 1);
+    await quiet();
+    assert.equal(agent.prompts.length, 0, "held");
+    assert.equal(agent.cancels.length, 0, "nothing to stop");
+
+    await chips.asOwner({ ...runOf(started), type: "run.resume" });
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.equal(agent.prompts.length, 1);
+    assert.match(agent.prompts[0] ?? "", /: hello there$/, "the prompt as it was, with nothing to carry on from");
+    assert.ok(!(agent.prompts[0] ?? "").includes(CARRY_ON));
+    assert.deepEqual(postsIn(chips, started.run_id), ["Here is the answer."]);
+  });
+
+  it("stops nothing on a Pause while a card waits, and hands the agent the answer only on Resume", async () => {
+    const { chips, client, agent } = await rig();
+    await chips.say("ask");
+    const asked = await sent(chips, "approval.request");
+    const run = sdkRun(client, asked.run_id);
+    run.hear({ ...runOf(asked), type: "run.pause", by: chips.workspace.owner.participantId });
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    await quiet();
+    assert.deepEqual(agent.cancels, [], "nothing stopped");
+    assert.deepEqual(postsIn(chips, asked.run_id), [], "the answer held: the agent hasn't gone on");
+
+    assert.deepEqual(agent.given, []);
+    run.hear({ ...runOf(asked), type: "run.resume", by: chips.workspace.owner.participantId });
+    await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    assert.deepEqual(agent.given, ["once"]);
+    assert.deepEqual(postsIn(chips, asked.run_id), ["Given: once"]);
+    assert.equal(agent.prompts.length, 1, "no carry-on: nothing was stopped");
+  });
+
+  it("answers a card held by a Pause as cancelled when a person stops the run", async () => {
+    const { chips, client, agent } = await rig();
+    await chips.say("ask");
+    const asked = await sent(chips, "approval.request");
+    sdkRun(client, asked.run_id).hear({ ...runOf(asked), type: "run.pause", by: chips.workspace.owner.participantId });
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    await quiet();
+    await chips.asOwner({ ...runOf(asked), type: "run.cancel" });
+    await until(() => agent.given.length === 1);
+    assert.deepEqual(agent.given, ["cancelled"], "as a Stop answers it, though a person allowed it while it was paused");
+    assert.deepEqual(agent.cancels, agent.made, "its turn stopped");
+    await quiet();
+    assert.deepEqual(postsIn(chips, asked.run_id), []);
+    assert.deepEqual(endsOf(chips, asked.run_id), []);
+  });
+
+  it("takes Pause and Resume again and again, saying what was steered meanwhile after the words to carry on", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("cut");
+    const started = await sent(chips, "run.started");
+    await until(() => agent.prompts.length === 1);
+    await chips.asOwner({ ...runOf(started), type: "run.pause" });
+    await until(() => agent.cancels.length === 1);
+    await chips.asOwner({ ...runOf(started), type: "run.steer", mode: "followup", text: "slow" });
+    await chips.asOwner({ ...runOf(started), type: "run.resume" });
+    await until(() => agent.prompts.length === 2);
+    assert.equal(agent.prompts[1], `${CARRY_ON}\n\nArjun adds: slow`);
+
+    await chips.asOwner({ ...runOf(started), type: "run.pause" });
+    await until(() => agent.cancels.length === 2);
+    await quiet();
+    assert.equal(agent.prompts.length, 2);
+    assert.deepEqual(endsOf(chips, started.run_id), []);
+    // Its answer this time is words alone, with no tool call to set the first prompt's half-sentence aside.
+    await chips.asOwner({ ...runOf(started), type: "run.steer", mode: "followup", text: "early" });
+    await chips.asOwner({ ...runOf(started), type: "run.resume" });
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.deepEqual(agent.prompts.slice(2), [`${CARRY_ON}\n\nArjun adds: early`]);
+    assert.deepEqual(new Set(agent.promptedIn), new Set(agent.made));
+    assert.equal(agent.made.length, 1);
+    assert.deepEqual(postsIn(chips, started.run_id), ["Early."]);
   });
 });
 

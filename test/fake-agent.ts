@@ -9,6 +9,7 @@
  *   the command, with its own words for it in `description` (`ask shell <command>` for another);
  * - `form`: it asks with a form which colour, and says the answer;
  * - `slow`: it waits until cancelled;
+ * - `cut`: it says half a sentence, then waits until cancelled;
  * - `nothing`: it says `NO_REPLY`;
  * - `refuse`: it stops with `refusal`;
  * - `die`: its process goes away mid-turn.
@@ -26,6 +27,8 @@
  * With `auth`, it says who it is signed in as after `initialize`: `out` is nobody, and it refuses
  * every turn, as Claude Code does signed out; with `refusesSessions` it refuses each session too, as
  * Codex does.
+ *
+ * With `opening`, each new session waits for it before it is made, as a slow agent's does.
  *
  * With `askFirst`, anything else said in the first session it was spoken to in asks permission to write the
  * tracker first, as a real agent asks before it changes something. It copies sessions (`session/fork`) unless `fork` is false, and
@@ -59,9 +62,13 @@ export interface FakeModels {
 export interface FakeAgent {
   readonly wire: () => Wire;
   readonly prompts: string[];
+  /** The session each prompt was said in. */
+  readonly promptedIn: string[];
   readonly made: string[];
   readonly loaded: string[];
   readonly cancels: string[];
+  /** What each `ask` was answered: the option picked, or `cancelled`. */
+  readonly given: string[];
   /** `<session>:<mode>` for each mode it was put in. */
   readonly modes: string[];
   /** The folder each session was made, loaded or copied in, by session. */
@@ -89,6 +96,7 @@ export function fakeAgent(
     model?: string;
     commands?: readonly string[];
     models?: FakeModels;
+    opening?: Promise<unknown>;
   } = {},
 ): FakeAgent {
   /** The first session it was spoken to in. */
@@ -97,9 +105,11 @@ export function fakeAgent(
     metas: [],
     sets: [],
     prompts: [],
+    promptedIn: [],
     made: [],
     loaded: [],
     cancels: [],
+    given: [],
     modes: [],
     cwds: new Map(),
     forks: [],
@@ -225,6 +235,7 @@ export function fakeAgent(
       const signedOut = { code: -32000, message: "Authentication required" };
       const prompt = async (id: unknown, sessionId: string, text: string) => {
         agent.prompts.push(text);
+        agent.promptedIn.push(sessionId);
         if (options.auth === "out" || options.refusesSessions === true) {
           send({ id, error: signedOut });
           return;
@@ -268,7 +279,8 @@ export function fakeAgent(
           return;
         }
         if (last === "pause") await new Promise((resolve) => setTimeout(resolve, 300));
-        if (last === "slow") {
+        if (last === "cut") say("Half a sent");
+        if (last === "slow" || last === "cut") {
           while (!cancelled.has(sessionId) && !gone) await new Promise((resolve) => setTimeout(resolve, 10));
           cancelled.delete(sessionId);
           reply("cancelled");
@@ -314,6 +326,7 @@ export function fakeAgent(
             ],
           });
           const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+          agent.given.push(outcome.optionId ?? outcome.outcome);
           say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
           reply("end_turn");
           return;
@@ -399,7 +412,8 @@ export function fakeAgent(
         reply("end_turn");
       };
 
-      const hear = (line: string) => {
+      /** A line from the bridge; `opened`, a new session's again once `opening` let it through. */
+      const hear = (line: string, opened = false) => {
         const message = JSON.parse(line) as Message;
         const params = (message["params"] ?? {}) as Message;
         const id = message["id"];
@@ -434,6 +448,10 @@ export function fakeAgent(
           case "session/new": {
             if (options.refusesSessions === true) {
               send({ id, error: signedOut });
+              return;
+            }
+            if (options.opening !== undefined && !opened) {
+              void options.opening.then(() => hear(line, true));
               return;
             }
             const sessionId = `sess-${agent.made.length + agent.loaded.length + 1}-${agent.starts}`;

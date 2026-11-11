@@ -16,8 +16,9 @@
  * tool calls as steps, its plan, its context gauge and cost — then its words in the room. What it
  * asks permission for is an approval card; what it asks with a form is a question card. Stop is
  * `session/cancel`. A steer is said to it as the next prompt of the same run, after stopping the
- * turn when the steer interrupts. A person's "Not right?" on a reply is one more turn of the agent
- * who said it, in that room, looking at it again.
+ * turn when the steer interrupts. Pause stops the turn as Stop does but keeps the run, and Resume
+ * tells the same session to carry on (Chips ADR 0293). A person's "Not right?" on a reply is one
+ * more turn of the agent who said it, in that room, looking at it again.
  *
  * Each agent's page shows its context window, kept by the bridge from what the agent says
  * (`windows.ts`), and for Claude Code and Codex the files the agent is built from (`context.ts`)
@@ -207,6 +208,8 @@ const IDLE_MS = 30 * 60_000;
 const ANSWERED = 500;
 /** The most of a reply quoted back to the agent that said it. */
 const QUOTED = 1500;
+/** What a paused run's agent is told on Resume (Chips ADR 0293), before anything steered meanwhile. */
+const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
 
 /** The agent's process: one for every agent of the kind, a session for each of their rooms. */
 interface Process {
@@ -275,6 +278,14 @@ interface Turn {
   /** More to say to it in this run: a person's steer. */
   readonly next: string[];
   cancelled: boolean;
+  /** A prompt is in the agent's hands: what Stop, Pause and an interrupting steer stop. */
+  prompting: boolean;
+  /** That prompt was told to stop (`session/cancel`), so it is told once. */
+  stopping: boolean;
+  /** A person's Pause stopped that prompt partway (Chips ADR 0293): what follows is "carry on", not the end. */
+  pausing: boolean;
+  /** How many of its asks wait on a person: a Pause while one does stops nothing. */
+  asking: number;
   costAtStart?: number | undefined;
   cost?: number | undefined;
   saidAt: number;
@@ -950,6 +961,10 @@ export class Bridge {
       thought: "",
       next: [],
       cancelled: false,
+      prompting: false,
+      stopping: false,
+      pausing: false,
+      asking: 0,
       saidAt: 0,
       gaugeAt: 0,
       steps: new Map(),
@@ -958,15 +973,31 @@ export class Bridge {
       folds: 0,
     };
     room.turn = turn;
+    this.sayPausable(run, speakerId);
+    // Stop, Pause and an interrupting steer all stop the prompt going, if one is: once, however many come.
+    const interrupt = () => {
+      if (!turn.prompting || turn.stopping) return;
+      turn.stopping = true;
+      this.process.client?.cancel(turn.sessionId);
+    };
     // Heard from the start, so a Stop while the session is still opening stops it too.
     run.on("cancel", () => {
       turn.cancelled = true;
-      if (turn.sessionId !== "") this.process.client?.cancel(turn.sessionId);
+      interrupt();
     });
     run.on("steer", (steer) => {
       turn.next.push(`${steer.from?.display_name ?? "The person"} adds: ${steer.text}`);
-      if (steer.mode === "interrupt" && turn.sessionId !== "") this.process.client?.cancel(turn.sessionId);
+      if (steer.mode === "interrupt") interrupt();
     });
+    // A Pause stops the prompt where it is and keeps the run (Chips ADR 0293). One while the agent
+    // waits on a person's answer stops nothing: the agent is only waiting, and the answer is held.
+    run.on("pause", () => {
+      this.log(`${record.name} paused in ${spaceId}`);
+      if (turn.asking > 0 || !turn.prompting) return;
+      turn.pausing = true;
+      interrupt();
+    });
+    run.on("resume", () => this.log(`${record.name} resumed in ${spaceId}`));
     const client = await this.running();
     if (client === undefined) {
       if (!run.over) await run.fail({ error: `${kind.name} isn't running right now.`, retryable: true });
@@ -993,23 +1024,74 @@ export class Bridge {
     let words = promptFor(message, { ...asked, rulesHeld: this.rules.holds(sessionId, rules) });
     const files = await this.filesFor(record, message);
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
-    if (turn.cancelled) return;
+    // A Pause while the session opened holds the first prompt, and the rules aren't told until it goes.
+    if (!(await this.unpaused(turn))) return;
     // Told as it is given, so a compaction during the turn, heard after, forgets them.
     this.rules.told(sessionId, rules);
     let stop = "end_turn";
-    for (let prompt: string | undefined = words; prompt !== undefined; prompt = turn.next.shift()) {
+    let prompt: string | undefined = words;
+    while (prompt !== undefined) {
+      // And one between two prompts holds the next.
+      if (!(await this.unpaused(turn))) return;
+      turn.prompting = true;
+      turn.stopping = false;
       try {
         stop = await client.prompt(sessionId, [{ type: "text", text: prompt }]);
       } catch (error) {
+        turn.prompting = false;
         this.rules.forget(sessionId);
         if (!run.over) await run.fail({ error: this.failure(record, error), retryable: true });
         return;
       }
+      turn.prompting = false;
       if (turn.cancelled) return;
-      if (stop === "cancelled" && turn.next.length > 0) continue;
+      const paused = turn.pausing;
+      turn.pausing = false;
+      // Paused as it stopped, or just after: nothing is posted, and the run isn't ended, until Resume.
+      if (!(await this.unpaused(turn))) return;
+      if (stop === "cancelled" && (paused || turn.next.length > 0)) {
+        // Stopped partway, by a Pause or an interrupting steer. What it was in the middle of saying
+        // is dropped, so the reply is what it says from here: one answer, not a half-sentence with
+        // its next words joined straight on.
+        turn.reply = "";
+        prompt = paused ? [CARRY_ON, ...turn.next.splice(0)].join("\n\n") : turn.next.shift();
+        continue;
+      }
       if (stop !== "end_turn" && stop !== "cancelled") break;
+      prompt = turn.next.shift();
     }
     await this.finish(room, turn, stop);
+  }
+
+  /**
+   * Once the run isn't paused (Chips ADR 0293): true to go on, false when it was stopped, before or
+   * while it waited, which ends the turn with nothing more said, as a Stop does.
+   */
+  private async unpaused(turn: Turn): Promise<boolean> {
+    if (turn.run.paused) await turn.run.whenRunning();
+    return !turn.cancelled && !turn.run.over;
+  }
+
+  /**
+   * That the run can pause (Chips ADR 0293), said once as it starts on a status of "Thinking…".
+   * The SDK this is built on, 1.0.4, has no word for it in `run.status()`, so it goes on the
+   * connection in the run's own envelope, as one of its agents' when it is theirs. A server from
+   * before drops the word, and a send that fails costs the turn nothing.
+   */
+  private sayPausable(run: Run, speakerId: string | undefined): void {
+    const envelope = {
+      space_id: run.spaceId,
+      run_id: run.id,
+      ...(speakerId === undefined ? {} : { actor: { kind: "agent", id: speakerId } }),
+    };
+    const unsaid = (error: unknown) => this.log(`couldn't say run ${run.id} can pause: ${messageOf(error)}`);
+    try {
+      void this.options.chips
+        .send("run.status", envelope, { phase: "thinking", verb_phrase: "Thinking…", pausable: true })
+        .catch(unsaid);
+    } catch (error) {
+      unsaid(error);
+    }
   }
 
   /**
@@ -1894,6 +1976,8 @@ export class Bridge {
       name?: string;
     }[];
     if (turn === undefined) return { outcome: { outcome: "cancelled" } };
+    // Asked as its prompt was being stopped for a Pause: ACP has what it still asks answered cancelled.
+    if (turn.pausing) return { outcome: { outcome: "cancelled" } };
     const call = (params["toolCall"] ?? {}) as Record<string, unknown>;
     const kind = toolOf(call) ?? "other";
     const title = typeof call["title"] === "string" ? call["title"] : `use ${kind}`;
@@ -1908,8 +1992,7 @@ export class Bridge {
         : { preview: { format: "json" as const, body: JSON.stringify(input, null, 2).slice(0, 200_000) } }),
       ...(call["toolCallId"] === undefined ? {} : { stepId: String(call["toolCallId"]) }),
     });
-    const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
-    const decision = await Promise.race([asked, stopped]);
+    const decision = await this.answerOf(turn, asked);
     if (decision === undefined) return { outcome: { outcome: "cancelled" } };
     const chosen = optionFor(decision, options, carriesCommand(input));
     if (decision.allowed && chosen !== undefined && call["toolCallId"] !== undefined) {
@@ -1932,8 +2015,10 @@ export class Bridge {
     if (turn === undefined || questions.length === 0 || questions.length > 4 || questions.some((q) => q === undefined)) {
       return { action: "decline" };
     }
-    const answer = await turn.run.question({ questions: questions as NonNullable<(typeof questions)[number]>[] });
-    if (answer.timedOut) return { action: "cancel" };
+    if (turn.pausing) return { action: "cancel" };
+    const asked = turn.run.question({ questions: questions as NonNullable<(typeof questions)[number]>[] });
+    const answer = await this.answerOf(turn, asked);
+    if (answer === undefined || answer.timedOut) return { action: "cancel" };
     const content: Record<string, unknown> = {};
     for (const [id, field] of properties) {
       const value = answer.answers[id]?.values[0];
@@ -1941,6 +2026,27 @@ export class Bridge {
       content[id] = field["type"] === "boolean" ? value === "yes" : value;
     }
     return { action: "accept", content };
+  }
+
+  /**
+   * A person's answer to what the agent asked, once the agent may have it: one given while the run
+   * is paused waits for Resume (Chips ADR 0293), and a Stop, before the answer or while it waits,
+   * leaves none. While an ask waits, a Pause stops nothing.
+   */
+  private async answerOf<T>(turn: Turn, asked: Promise<T>): Promise<T | undefined> {
+    let off = (): void => undefined;
+    const stopped = new Promise<undefined>((resolve) => {
+      off = turn.run.on("cancel", () => resolve(undefined));
+    });
+    turn.asking += 1;
+    try {
+      const answer = await Promise.race([asked, stopped]);
+      if (answer === undefined) return undefined;
+      return (await this.unpaused(turn)) ? answer : undefined;
+    } finally {
+      off();
+      turn.asking -= 1;
+    }
   }
 }
 

@@ -159,9 +159,10 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 | The reply | `agent_message_chunk`s gathered into one message; `NO_REPLY` alone is the turn passed |
 | Files in the reply | each `MEDIA:<path>` line of the reply sent as an upload with its words, only from the agent's folder (`sendAnswer`); the post says why one could not go |
 | Approval card | `session/request_permission`, asked in the agent's own words where the call has a `description` (Claude Code's commands: "Syntax-check game.js? `node --check game.js`"), else "Allow it to" and the call's title; allowed always picks `allow_always`, except for a command, which picks `allow_once` since Chips remembers it by how each part starts (Chips ADR 0239); no picks `reject_once`; Stop answers `cancelled`; the card hears how the call went |
-| Question card | `elicitation/create` form of up to four choice or yes/no fields; anything else is declined |
+| Question card | `elicitation/create` form of up to four choice or yes/no fields; anything else is declined; Stop answers `cancel` |
 | Stop | `session/cancel` |
-| Steer | the next prompt of the same run, after `session/cancel` when it interrupts |
+| Pause (Chips ADR 0293) | each run says `pausable: true` as it starts; Pause is `session/cancel` with the run kept and nothing posted, and Resume the next prompt of the same session: "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.", then anything steered meanwhile. A Pause before a prompt holds it; one while an approval or question card waits stops nothing, and the answer reaches the agent on Resume |
+| Steer | the next prompt of the same run, after `session/cancel` when it interrupts; the words it was cut off in are dropped, so the reply is one answer |
 | Not right? (Chips ADR 0200) | a `correction`, or an older device's 👎: one more turn of the agent who said the reply (by its id in the room's lines), in that room's session, quoting its reply and what was wrong; the run is *Looking again: …*; a 👍 or any other reaction is nothing, and each is answered once |
 | Restart | the agent's process stopped and run again |
 | Trouble | the agent not running; it is run again after 2 s, longer each time it fails to start |

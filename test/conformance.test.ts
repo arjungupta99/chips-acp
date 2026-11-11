@@ -14,6 +14,16 @@ import { type Chips, connect } from "@chipschat/harness";
 import { Bridge, type KindConfig, settingsFor } from "../src/bridge.ts";
 import { fakeAgent } from "./fake-agent.ts";
 
+/**
+ * What the kit found, but for its notes and one warning: that Chips drops the `pausable` each run
+ * says (Chips ADR 0293). This kit is 1.0.4's, a Chips from before the word, and drops it as any
+ * such server does, which is as the ADR means it to go; a kit that knows the word finds nothing.
+ */
+function findingsOf(report: Awaited<ReturnType<typeof runConformance>>) {
+  const dropped = "run.status carried `pausable`, which the protocol does not declare: Chips drops it";
+  return report.findings.filter((finding) => finding.severity !== "note" && finding.message !== dropped);
+}
+
 it("passes the golden scenario", async () => {
   let client: Chips | undefined;
   let bridge: Bridge | undefined;
@@ -49,7 +59,7 @@ it("passes the golden scenario", async () => {
   });
   assert.ok(report.passed, formatReport(report).join("\n"));
   assert.deepEqual(
-    report.findings.filter((finding) => finding.severity !== "note"),
+    findingsOf(report),
     [],
     formatReport(report).join("\n"),
   );
@@ -130,7 +140,7 @@ it("passes the settings checks as Claude Code: its agents' files, their context 
   });
   assert.ok(report.passed, formatReport(report).join("\n"));
   assert.deepEqual(
-    report.findings.filter((finding) => finding.severity !== "note"),
+    findingsOf(report),
     [],
     formatReport(report).join("\n"),
   );
