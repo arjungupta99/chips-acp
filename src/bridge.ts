@@ -38,6 +38,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  Ack,
   Agent,
   AgentContextCopy,
   AgentContextWindowCopy,
@@ -62,6 +63,7 @@ import {
 } from "@chipschat/harness";
 import {
   type AgentAsked,
+  type AgentAttached,
   type AgentFork,
   type AnyEvent,
   type ContextEditFrame,
@@ -73,6 +75,7 @@ import {
   type ModelChangeFrame,
   type ProjectFacts,
   type RiskClass,
+  type RoomContext,
   type StepKind,
   type WindowChangeFrame,
   type WindowCompactFrame,
@@ -299,7 +302,15 @@ interface Room {
    * goes is sent with them among the lines since, and its turn leaves them out (Chips ADR 0294).
    */
   readonly answered: string[];
+  /**
+   * What Chips answered when it held the agent's last words here from the agents they named (Chips
+   * ADR 0097): its next turn in the room is told, first.
+   */
+  heldPost?: Pick<Ack, "held" | "exchange"> | undefined;
 }
+
+/** How many rooms' lines from before an agent joined are kept for its first turn there. */
+const CAUGHT_UP_MOST = 200;
 
 /** The turn going in a room: its run, and what the agent has streamed into it. */
 interface Turn {
@@ -372,6 +383,11 @@ export class Bridge {
   private knew: () => void = () => undefined;
   /** What is said in the rooms is taken in the order it came: a message, then what was overheard after it. */
   private arriving: Promise<unknown> = Promise.resolve();
+  /**
+   * What was said in a room before one of its agents joined it (Chips ADR 0088), by the agent and
+   * the room: said at the agent's first turn there, and kept no longer.
+   */
+  private readonly caughtUp = new Map<string, Pick<RoomContext, "lines">>();
   /** Records are made one at a time, so two never take the same folder. */
   private making: Promise<unknown> = Promise.resolve();
   /** The feedback already answered, oldest first. */
@@ -428,6 +444,7 @@ export class Bridge {
     };
     chips.on("message.new", (message) => inOrder("a message", () => this.hear(message)));
     chips.on("message.overheard", (message) => inOrder("words overheard", async () => this.overheard(message)));
+    chips.on("agent.attached", (attached) => this.attached(attached));
     chips.on("agent.asked", (asked) => after("a new agent", () => this.make(asked)));
     chips.on("agent.fork", (fork) => after("a copy", () => this.copy(fork)));
     chips.on("feedback", (feedback) => after("a second look", () => this.lookAgain(feedback)));
@@ -918,6 +935,20 @@ export class Bridge {
   }
 
   /**
+   * One of its agents put in a room (Chips ADR 0088): the room's last lines before it joined come
+   * with the news, and are kept for the agent's first turn there, which says them once.
+   */
+  private attached(attached: AgentAttached): void {
+    const { agent_id: agentId, space_id: spaceId, catch_up: before } = attached;
+    if (spaceId === undefined || before === undefined || before.lines.length === 0) return;
+    this.caughtUp.set(`${agentId}|${spaceId}`, before);
+    for (const oldest of this.caughtUp.keys()) {
+      if (this.caughtUp.size <= CAUGHT_UP_MOST) break;
+      this.caughtUp.delete(oldest);
+    }
+  }
+
+  /**
    * Words said in a room to others (Chips ADR 0294): kept where a message waits for one of its
    * agents there, as said after the newest of them, and told to the turn that takes it. Chips
    * hands a turn what was said before its message; this is what is said while the message waits.
@@ -1115,12 +1146,16 @@ export class Bridge {
     };
     // A session told the room's rules isn't told them again until they change or it compacts.
     const rules = rulesFor(message, asked);
+    // What was said before the agent joined, at its first turn here; and that Chips held its last words.
+    const joined = `${speakerId ?? record.agentId}|${spaceId}`;
     let words = promptForAll(message, {
       ...asked,
       rulesHeld: this.rules.holds(sessionId, rules),
       earlier,
       since,
       answered: room.answered,
+      before: this.caughtUp.get(joined),
+      heldPost: room.heldPost,
     });
     const files: string[] = [];
     for (const each of [...earlier, message]) files.push(...(await this.filesFor(record, each)));
@@ -1147,7 +1182,11 @@ export class Bridge {
       }
       turn.prompting = false;
       // Its session holds them now, however the turn goes on from here.
-      if (prompt === words) keepAnswered(room.answered, [...earlier, message]);
+      if (prompt === words) {
+        keepAnswered(room.answered, [...earlier, message]);
+        this.caughtUp.delete(joined);
+        room.heldPost = undefined;
+      }
       if (turn.cancelled) return;
       const paused = turn.pausing;
       turn.pausing = false;
@@ -1309,7 +1348,12 @@ export class Bridge {
     const post = await sendAnswer(words, { folders: [room.record.folder], upload: (input) => chips.upload(input) });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
-      await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
+      const taken = await turn.speaker.post({ spaceId: room.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
+      // Held from the agents it named (Chips ADR 0097): its next turn here is told, so it doesn't wait on them.
+      if (taken.held === true) {
+        room.heldPost = { held: true, ...(taken.exchange === undefined ? {} : { exchange: taken.exchange }) };
+        this.log(`Chips held what ${room.record.name} said in ${room.spaceId} from the agents it named`);
+      }
     }
     const cut = stop === "max_tokens" || stop === "max_turn_requests";
     const said = post.summary;

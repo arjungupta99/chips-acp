@@ -11,6 +11,7 @@
  * - `slow`: it waits until cancelled;
  * - `cut`: it says half a sentence, then waits until cancelled;
  * - `nothing`: it says `NO_REPLY`;
+ * - `tell <name>`, the last words of the line: a moment later it hands over with `@<name> over to you.`;
  * - `refuse`: it stops with `refusal`;
  * - `die`: its process goes away mid-turn.
  * - `narrate`: it says what it will do, reads a file, and then answers.
@@ -307,6 +308,13 @@ export function fakeAgent(
           // A page written in its folder and named as the Chips SDK says, and a file outside it.
           writeFileSync(join(agent.cwds.get(sessionId) ?? ".", "page.html"), "<p>play</p>");
           say("The page is ready.\n\nMEDIA:page.html\nMEDIA:/etc/hosts");
+          reply("end_turn");
+          return;
+        }
+        const told = /(?:^| )tell (\S+)$/.exec(last);
+        if (told !== null) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          say(`@${told[1]} over to you.`);
           reply("end_turn");
           return;
         }

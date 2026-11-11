@@ -413,6 +413,58 @@ describe("what waited for an agent (Chips ADR 0294)", () => {
   });
 });
 
+describe("what a turn is told of its agent's place in the room", () => {
+  it("says what was said before the agent joined, at its first turn there and not again (Chips ADR 0088)", async () => {
+    const { chips, agent, state } = await rig();
+    const room = chips.address.spaceId;
+    await chips.say("we need a board");
+    await sent(chips, "run.completed");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    const nova = await recordOf(state, await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId));
+    assert.ok(nova !== undefined);
+    await chips.say("@Nova draw it");
+    await until(() => agent.prompts.some((prompt) => /: @Nova draw it$/.test(prompt)));
+    const first = agent.prompts.find((prompt) => /: @Nova draw it$/.test(prompt)) ?? "";
+    assert.match(first, /\n\nSaid in this space before you joined:\n(?:[^\n]+\n)*[^\n]+: we need a board\n[^\n]+: Here is the answer\.\n/);
+    assert.equal(first.split("draw it").length, 2, "its own message is not among them");
+    await sent(chips, "run.completed", (event) => event.actor.id === nova.agentId);
+
+    await chips.say("@Nova and name it");
+    await until(() => agent.prompts.some((prompt) => /: @Nova and name it$/.test(prompt)));
+    assert.doesNotMatch(agent.prompts.find((prompt) => /: @Nova and name it$/.test(prompt)) ?? "", /before you joined/);
+  });
+
+  it("says first, at its next turn, that Chips held its last words from the agents they named (Chips ADR 0097)", async () => {
+    const { chips, agent, state, logs } = await rig();
+    const room = chips.address.spaceId;
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const own = Object.values(state.agents).find((record) => record.name !== "Nova");
+    assert.ok(own !== undefined);
+    await chips.say(`@${own.name} tell Nova`);
+    await until(() => agent.prompts.length === 1);
+    // A person pauses the agents while it works: what it then says to Nova is held.
+    chips.workspace.setExchange(room, "paused", chips.workspace.owner.participantId);
+    await until(() => logs.some((line) => /^Chips held what .+ said in /.test(line)));
+    await sent(chips, "run.completed");
+    assert.equal(agent.prompts.length, 1, "Nova never had the words");
+
+    // A person's next words let the held message go to Nova too, so the agent's own turn is found by its words.
+    const turnOn = (words: string) => agent.prompts.find((prompt) => prompt.endsWith(`: @${own.name} ${words}`));
+    await chips.say(`@${own.name} what now`);
+    await until(() => turnOn("what now") !== undefined);
+    assert.match(
+      turnOn("what now") ?? "",
+      /^Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held[^.]* until a person acts\. Until then, tell the person what is done and what is blocked, rather than asking the agents again\.\n\n/,
+    );
+    await until(() => chips.workspace.log.filter((event) => event.type === "run.completed").length >= 3);
+
+    await chips.say(`@${own.name} and after`);
+    await until(() => turnOn("and after") !== undefined);
+    assert.doesNotMatch(turnOn("and after") ?? "", /was held, so the agents it named/, "said once");
+  });
+});
+
 describe("no Main agent", () => {
   it("registers none: the harness's own agent is an ordinary one, in a folder of its own", async () => {
     const { chips, agent, state, kind, agentId } = await rig();

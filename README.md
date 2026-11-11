@@ -147,6 +147,8 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 |---|---|
 | A message for an agent | `session/prompt` with the room note and who said it (`promptFor`), files saved under `<folder>/chips-files/` |
 | What waited for an agent (Chips ADR 0294) | one prompt once the agent is free, not one each: under the newest message's note, each message that waited said in full, oldest first, then what was said in the room after, to others. A message Chips handed over, and a Not right?, are a prompt of their own. An idle agent starts 150 ms after the first words, so all it is sent at once, as when the bridge comes back, is one prompt |
+| What was said before an agent joined (Chips ADR 0088) | the room's last lines from before the agent was put in it (`agent.attached`'s `catch_up`), said once, at its first prompt there, under "Said in this space before you joined:", ahead of the lines since |
+| A message Chips held (Chips ADR 0097) | when Chips answers what an agent said with `held` (the agents in the room have sent each other the workspace's hold, or a person paused them), the agent's next prompt in the room opens by saying so: the agents it named do not have the message yet, so it tells the person what is done and what is blocked rather than asking them again. Said once |
 | The room | a session in the agent's folder: `session/new` the first time, `session/load` after a restart or an idle close where the agent offers it |
 | A room from the + | `claimSpace` under a new key; Chips makes its agent; the first words are its first prompt |
 | A new agent (Add) | a record and a folder, registered with `madeFor` and the room |
