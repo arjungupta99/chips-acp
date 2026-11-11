@@ -23,7 +23,8 @@
  * An agent takes one turn at a time in a room. What is said to it meanwhile, and all it was sent
  * while the bridge was away, is one turn once it is free, not one each (Chips ADR 0294): the
  * newest message's, with those that waited ahead of it said in full, and what was said in the room
- * after, to others, said last (`fold.ts`).
+ * after, to others, said last. The Chips SDK words it (`promptFor`); `fold.ts` is what the bridge
+ * keeps to make it.
  *
  * Each agent's page shows its context window, kept by the bridge from what the agent says
  * (`windows.ts`), and for Claude Code and Codex the files the agent is built from (`context.ts`)
@@ -55,6 +56,7 @@ import type {
 import {
   firstTurnOf,
   heldNote,
+  promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
@@ -95,7 +97,7 @@ import {
 } from "./acp.js";
 import { settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
-import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard, promptForAll } from "./fold.js";
+import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
 import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
 import { VERSION } from "./version.js";
 import {
@@ -1148,7 +1150,7 @@ export class Bridge {
     const rules = rulesFor(message, asked);
     // What was said before the agent joined, at its first turn here; and that Chips held its last words.
     const joined = `${speakerId ?? record.agentId}|${spaceId}`;
-    let words = promptForAll(message, {
+    let words = promptFor(message, {
       ...asked,
       rulesHeld: this.rules.holds(sessionId, rules),
       earlier,

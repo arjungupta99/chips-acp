@@ -999,7 +999,7 @@ describe("a person's Pause (Chips ADR 0293)", () => {
     for (const each of said) {
       assert.deepEqual(each.payload, { phase: "thinking", verb_phrase: "Thinking…", pausable: true });
     }
-    // The fake is a Chips from before ADR 0293: it takes each status, by the run's agent, and drops the word.
+    // The kit's Chips knows the word from 1.0.5 (ADR 0293): it takes each status, by the run's agent, and keeps the word.
     const thinking = chips.workspace.log.filter(
       (event) => event.type === "run.status" && event.payload["verb_phrase"] === "Thinking…",
     );
@@ -1010,7 +1010,8 @@ describe("a person's Pause (Chips ADR 0293)", () => {
         [second.run_id, agentId],
       ],
     );
-    assert.ok(chips.workspace.dropped.some((each) => each.type === "run.status" && each.field === "pausable"));
+    assert.ok(thinking.every((event) => event.payload["pausable"] === true));
+    assert.ok(!chips.workspace.dropped.some((each) => each.type === "run.status"), "nothing of it is dropped");
   });
 
   it("answers as ever when saying it can pause fails", async () => {
