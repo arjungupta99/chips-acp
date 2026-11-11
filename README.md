@@ -146,6 +146,7 @@ minutes and loaded again with its memory. Fourteen runs, none failed, $0.35, all
 | Chips | ACP |
 |---|---|
 | A message for an agent | `session/prompt` with the room note and who said it (`promptFor`), files saved under `<folder>/chips-files/` |
+| What waited for an agent (Chips ADR 0294) | one prompt once the agent is free, not one each: under the newest message's note, each message that waited said in full, oldest first, then what was said in the room after, to others. A message Chips handed over, and a Not right?, are a prompt of their own. An idle agent starts 150 ms after the first words, so all it is sent at once, as when the bridge comes back, is one prompt |
 | The room | a session in the agent's folder: `session/new` the first time, `session/load` after a restart or an idle close where the agent offers it |
 | A room from the + | `claimSpace` under a new key; Chips makes its agent; the first words are its first prompt |
 | A new agent (Add) | a record and a folder, registered with `madeFor` and the room |

@@ -54,6 +54,7 @@ async function rig(
     folders?: string;
     folder?: string;
     projects?: boolean;
+    gatherMs?: number;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" }));
@@ -77,6 +78,7 @@ async function rig(
     wire: () => agent.wire(),
     log: (line) => logs.push(line),
     respawnMs: 20,
+    gatherMs: options.gatherMs ?? 10,
     ...(options.projects === undefined ? {} : { projects: options.projects }),
     ...(options.idleMs === undefined ? {} : { idleMs: options.idleMs }),
   });
@@ -331,6 +333,83 @@ describe("a turn", () => {
       assert.match(String(failed.payload["error"]), words);
       assert.equal(failed.payload["retryable"], true);
     }
+  });
+});
+
+describe("what waited for an agent (Chips ADR 0294)", () => {
+  const starts = (chips: FakeChips) => chips.workspace.log.filter((event) => event.type === "run.started");
+
+  it("is one turn once it is free: each message in full, oldest first, and none said twice", async () => {
+    const { chips, agent, logs } = await rig();
+    await chips.say("pause");
+    await until(() => agent.prompts.length === 1);
+    await chips.say("draw the board\nnine by nine");
+    await chips.say("and name it");
+    await chips.say("no border");
+    await until(() => agent.prompts.length === 2);
+    await quiet();
+    assert.equal(agent.prompts.length, 2, "one turn for the three that waited");
+    assert.equal(starts(chips).length, 2);
+    const prompt = agent.prompts[1] ?? "";
+    assert.match(prompt, /In this space:/, "under the newest's note");
+    assert.match(
+      prompt,
+      /\n\n3 messages for you waited while you were working or away\. They follow, oldest first\. Answer them together in one reply, and where a later one changes or settles an earlier one, go by the later\.\n\n[^\n]+: draw the board\nnine by nine\n\n[^\n]+: and name it\n\n[^\n]+: no border$/,
+    );
+    assert.equal(prompt.split("draw the board").length, 2, "said once: left out of the lines since");
+    assert.equal(prompt.split("and name it").length, 2);
+    assert.doesNotMatch(prompt, /pause/, "nor is what it had just answered");
+    assert.ok(logs.some((line) => /takes 3 messages that waited/.test(line)));
+    assert.equal(starts(chips).at(-1)?.payload["goal"], "no border", "named for the newest");
+  });
+
+  it("is one turn for all it is sent at once, as when the bridge comes back", async () => {
+    const { chips, agent } = await rig({ gatherMs: 150 });
+    await Promise.all([chips.say("one"), chips.say("two"), chips.say("three")]);
+    await sent(chips, "run.completed");
+    await quiet();
+    assert.equal(agent.prompts.length, 1);
+    assert.match(agent.prompts[0] ?? "", /3 messages for you waited/);
+  });
+
+  it("leaves a second look a turn of its own, between what waited before it and after", async () => {
+    const { chips, agent } = await rig();
+    const reply = await replyTo(chips, "hello");
+    const turns = agent.prompts.length;
+    await chips.say("pause");
+    await until(() => agent.prompts.length === turns + 1);
+    await chips.say("before one");
+    await chips.say("before two");
+    await feedback(chips, chips.address.spaceId, messageIdOf(reply.id), { kind: "correction", text: "Too short" });
+    await until(() => agent.prompts.some((prompt) => /wasn't right/.test(prompt)));
+    await chips.say("after");
+    await until(() => agent.prompts.length === turns + 4);
+    await quiet();
+    const [waited, again, after] = agent.prompts.slice(turns + 1);
+    assert.match(waited ?? "", /2 messages for you waited[^]*: before one\n\n[^\n]+: before two$/);
+    assert.match(again ?? "", /wasn't right/);
+    assert.doesNotMatch(again ?? "", /messages for you waited/);
+    assert.match(after ?? "", /: after$/);
+    assert.doesNotMatch(after ?? "", /messages for you waited/);
+  });
+
+  it("tells the turn what was said to another of its agents after the message arrived", async () => {
+    const { chips, agent, state } = await rig();
+    const room = chips.address.spaceId;
+    const { askId } = await chips.askForAgent(room, "Nova");
+    const nova = await recordOf(state, await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId));
+    assert.ok(nova !== undefined);
+    const own = Object.values(state.agents).find((record) => record.key !== nova.key);
+    assert.ok(own !== undefined);
+    await chips.say(`@${own.name} pause`);
+    await until(() => agent.prompts.length === 1);
+    await chips.say(`@${own.name} draw the board`);
+    await chips.say("@Nova nothing");
+    const mine = (prompt: string) => /: @\S+ draw the board\n\nSaid in this space after/.test(prompt);
+    await until(() => agent.prompts.some(mine));
+    const prompt = agent.prompts.find(mine) ?? "";
+    assert.match(prompt, /: @\S+ draw the board\n\nSaid in this space after that message, to others:\n[^\n]+: @Nova nothing$/);
+    assert.doesNotMatch(prompt, /pause/, "what it had a turn on is not among the lines since again");
   });
 });
 

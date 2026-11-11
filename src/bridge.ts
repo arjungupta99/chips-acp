@@ -20,6 +20,11 @@
  * tells the same session to carry on (Chips ADR 0293). A person's "Not right?" on a reply is one
  * more turn of the agent who said it, in that room, looking at it again.
  *
+ * An agent takes one turn at a time in a room. What is said to it meanwhile, and all it was sent
+ * while the bridge was away, is one turn once it is free, not one each (Chips ADR 0294): the
+ * newest message's, with those that waited ahead of it said in full, and what was said in the room
+ * after, to others, said last (`fold.ts`).
+ *
  * Each agent's page shows its context window, kept by the bridge from what the agent says
  * (`windows.ts`), and for Claude Code and Codex the files the agent is built from (`context.ts`)
  * and the model it runs on (`models.ts`). A person's Compact now is `/compact` said to the agent's
@@ -49,7 +54,6 @@ import type {
 import {
   firstTurnOf,
   heldNote,
-  promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
@@ -65,6 +69,7 @@ import {
   type LastCompaction,
   LONG_TURN_FOLDS_MAX,
   type MessageNew,
+  type MessageOverheard,
   type ModelChangeFrame,
   type ProjectFacts,
   type RiskClass,
@@ -87,6 +92,7 @@ import {
 } from "./acp.js";
 import { settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
+import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard, promptForAll } from "./fold.js";
 import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
 import { VERSION } from "./version.js";
 import {
@@ -188,6 +194,8 @@ export interface BridgeOptions {
   readonly respawnMs?: number | undefined;
   /** How long a session may be quiet before it is closed: half an hour unless said. */
   readonly idleMs?: number | undefined;
+  /** How long an idle agent waits before it starts, so all it is sent at once is one turn: 150 ms unless said. */
+  readonly gatherMs?: number | undefined;
   /**
    * The environment the agent runs in, for where its files are (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`)
    * and what beats its settings: this process's with the kind's, unless a test hands in its own.
@@ -239,6 +247,31 @@ interface Asked {
    * line. Its words name who asked already, so they aren't said as theirs.
    */
   readonly again?: string | undefined;
+  /**
+   * What was said in the room to others after it arrived, while it waited as the newest (Chips ADR
+   * 0294): its turn is told, so it starts on the room as it is.
+   */
+  readonly since: Heard[];
+}
+
+/** Whether a waiting message may share a turn with others: not a second look, nor one Chips handed over. */
+function shares(asked: Asked): boolean {
+  return asked.again === undefined && folds(asked.message);
+}
+
+/**
+ * The waiting messages that make an agent's next turn (Chips ADR 0294), taken off its queue, oldest
+ * first: all of them, up to one that is a turn of its own, which is the turn after.
+ */
+function nextTurn(queue: Asked[]): Asked[] {
+  const first = queue.shift();
+  if (first === undefined) return [];
+  const taken = [first];
+  if (!shares(first)) return taken;
+  while (queue[0] !== undefined && shares(queue[0]) && queue[0].speakerId === first.speakerId) {
+    taken.push(queue.shift() as Asked);
+  }
+  return taken;
 }
 
 /** A compaction a room's session is to have, after the turn going in it: a person's, or past its limit. */
@@ -259,6 +292,13 @@ interface Room {
   compact?: CompactAsk | undefined;
   /** When it last ended a turn, for closing it once it has been quiet a while. */
   usedAt: number;
+  /** It is about to start: a moment in which all it is sent at once gathers (Chips ADR 0294). */
+  gathering?: NodeJS.Timeout | undefined;
+  /**
+   * The messages its session has been given, the newest of them: one that arrives while their turn
+   * goes is sent with them among the lines since, and its turn leaves them out (Chips ADR 0294).
+   */
+  readonly answered: string[];
 }
 
 /** The turn going in a room: its run, and what the agent has streamed into it. */
@@ -330,6 +370,8 @@ export class Bridge {
   /** What Chips asks waits for the agents to be known: they are read at start. */
   private readonly known: Promise<void>;
   private knew: () => void = () => undefined;
+  /** What is said in the rooms is taken in the order it came: a message, then what was overheard after it. */
+  private arriving: Promise<unknown> = Promise.resolve();
   /** Records are made one at a time, so two never take the same folder. */
   private making: Promise<unknown> = Promise.resolve();
   /** The feedback already answered, oldest first. */
@@ -378,7 +420,14 @@ export class Bridge {
     const after = (what: string, then: () => Promise<void>) => {
       void this.known.then(then).catch((error: unknown) => this.log(`${what} went wrong: ${messageOf(error)}`));
     };
-    chips.on("message.new", (message) => after("a message", () => this.hear(message)));
+    const inOrder = (what: string, then: () => Promise<void>) => {
+      this.arriving = this.arriving
+        .then(() => this.known)
+        .then(then)
+        .catch((error: unknown) => this.log(`${what} went wrong: ${messageOf(error)}`));
+    };
+    chips.on("message.new", (message) => inOrder("a message", () => this.hear(message)));
+    chips.on("message.overheard", (message) => inOrder("words overheard", async () => this.overheard(message)));
     chips.on("agent.asked", (asked) => after("a new agent", () => this.make(asked)));
     chips.on("agent.fork", (fork) => after("a copy", () => this.copy(fork)));
     chips.on("feedback", (feedback) => after("a second look", () => this.lookAgain(feedback)));
@@ -410,6 +459,7 @@ export class Bridge {
     this.process.stopping = true;
     this.process.client?.close();
     clearInterval(this.sweeper);
+    for (const room of this.rooms.values()) clearTimeout(room.gathering);
     for (const timer of this.windowTimers.values()) clearTimeout(timer);
     this.windowTimers.clear();
   }
@@ -661,8 +711,8 @@ export class Bridge {
         for: [agent.agentId],
       } as unknown as MessageNew);
     const room = this.roomOf(record, spaceId);
-    room.queue.push({ message, speakerId: agent.agentId });
-    void this.pump(room);
+    room.queue.push({ message, speakerId: agent.agentId, since: [] });
+    this.soon(room);
   }
 
   /** Who said a room's first words, from the room's lines. */
@@ -846,18 +896,56 @@ export class Bridge {
 
   // ------------------------------------------------------------------ what is said to it
 
-  /** A message for some of its agents: each takes a turn in its room, one after another there. */
+  /**
+   * A message for some of its agents: each takes it in its room, one turn at a time there. It waits
+   * while a turn is going, and is in the next with whatever else waits (Chips ADR 0294).
+   */
   private async hear(message: MessageNew, again?: string): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
+    const takes = new Set<Room>();
     for (const taker of message.for ?? [harnessId]) {
       const record = taker === harnessId ? await this.inRoom(spaceId) : await this.recordOf(taker);
       if (record === undefined) continue;
       const room = this.roomOf(record, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, again });
-      void this.pump(room);
+      takes.add(room);
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, again, since: [] });
+      this.soon(room);
     }
+    // To its other agents in the room it was said to somebody else, as what they overhear is.
+    if (again === undefined) this.saidToOthers(spaceId, message, takes);
+  }
+
+  /**
+   * Words said in a room to others (Chips ADR 0294): kept where a message waits for one of its
+   * agents there, as said after the newest of them, and told to the turn that takes it. Chips
+   * hands a turn what was said before its message; this is what is said while the message waits.
+   */
+  private overheard(message: MessageOverheard): void {
+    if (message.space_id !== undefined) this.saidToOthers(message.space_id, message, new Set());
+  }
+
+  /** Kept by each of its agents in the room with a message waiting, but those it is for, and the one who said it. */
+  private saidToOthers(spaceId: string, said: Heard, takes: ReadonlySet<Room>): void {
+    for (const room of this.rooms.values()) {
+      const newest = room.queue.at(-1);
+      if (newest === undefined || room.spaceId !== spaceId || takes.has(room)) continue;
+      if (said.from.participant_id === room.record.agentId) continue;
+      keepHeard(newest.since, { from: said.from, text: said.text, attachments: said.attachments, held: said.held });
+    }
+  }
+
+  /**
+   * An idle agent starts in a moment, not at once (Chips ADR 0294): a bridge that comes back is
+   * sent all it missed together, and what waits when a turn starts is one turn.
+   */
+  private soon(room: Room): void {
+    if (room.busy || room.gathering !== undefined) return;
+    room.gathering = setTimeout(() => {
+      room.gathering = undefined;
+      void this.pump(room);
+    }, this.options.gatherMs ?? GATHER_MS);
   }
 
   /**
@@ -904,7 +992,7 @@ export class Bridge {
     const id = `${record.key}|${spaceId}`;
     let room = this.rooms.get(id);
     if (room === undefined) {
-      room = { record, spaceId, queue: [], busy: false, usedAt: Date.now() };
+      room = { record, spaceId, queue: [], busy: false, usedAt: Date.now(), answered: [] };
       this.rooms.set(id, room);
     }
     return room;
@@ -929,11 +1017,11 @@ export class Bridge {
       }
       return;
     }
-    const asked = room.queue.shift();
-    if (asked === undefined) return;
+    const waiting = nextTurn(room.queue);
+    if (waiting.length === 0) return;
     room.busy = true;
     try {
-      await this.turn(room, asked);
+      await this.turn(room, waiting);
     } catch (error) {
       this.log(`a turn of ${room.record.name} went wrong: ${String(error)}`);
     } finally {
@@ -946,7 +1034,13 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId, again }: Asked): Promise<void> {
+  /**
+   * One turn on what waited (Chips ADR 0294): the newest message's, whose note and lines it is
+   * handed, with those that waited ahead of it said in full, and what was said after to others.
+   */
+  private async turn(room: Room, waiting: readonly Asked[]): Promise<void> {
+    const { message, speakerId, again, since } = waiting.at(-1) as Asked;
+    const earlier = waiting.slice(0, -1).map((each) => each.message);
     const { record, spaceId } = room;
     const { kind } = this.options;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
@@ -1021,9 +1115,17 @@ export class Bridge {
     };
     // A session told the room's rules isn't told them again until they change or it compacts.
     const rules = rulesFor(message, asked);
-    let words = promptFor(message, { ...asked, rulesHeld: this.rules.holds(sessionId, rules) });
-    const files = await this.filesFor(record, message);
+    let words = promptForAll(message, {
+      ...asked,
+      rulesHeld: this.rules.holds(sessionId, rules),
+      earlier,
+      since,
+      answered: room.answered,
+    });
+    const files: string[] = [];
+    for (const each of [...earlier, message]) files.push(...(await this.filesFor(record, each)));
     if (files.length > 0) words = `${words}\n\n${files.join("\n")}`;
+    if (earlier.length > 0) this.log(`${record.name} takes ${waiting.length} messages that waited in ${spaceId} as one turn`);
     // A Pause while the session opened holds the first prompt, and the rules aren't told until it goes.
     if (!(await this.unpaused(turn))) return;
     // Told as it is given, so a compaction during the turn, heard after, forgets them.
@@ -1044,6 +1146,8 @@ export class Bridge {
         return;
       }
       turn.prompting = false;
+      // Its session holds them now, however the turn goes on from here.
+      if (prompt === words) keepAnswered(room.answered, [...earlier, message]);
       if (turn.cancelled) return;
       const paused = turn.pausing;
       turn.pausing = false;
