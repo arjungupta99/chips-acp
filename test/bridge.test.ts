@@ -434,7 +434,7 @@ describe("what a turn is told of its agent's place in the room", () => {
     assert.doesNotMatch(agent.prompts.find((prompt) => /: @Nova and name it$/.test(prompt)) ?? "", /before you joined/);
   });
 
-  it("says first, at its next turn, that Chips held its last words from the agents they named (Chips ADR 0097)", async () => {
+  it("says first, at its next turn, that Chips held its last words until a person acted, and the agents have them now (Chips ADR 0097)", async () => {
     const { chips, agent, state, logs } = await rig();
     const room = chips.address.spaceId;
     const { askId } = await chips.askForAgent(room, "Nova");
@@ -449,13 +449,13 @@ describe("what a turn is told of its agent's place in the room", () => {
     await sent(chips, "run.completed");
     assert.equal(agent.prompts.length, 1, "Nova never had the words");
 
-    // A person's next words let the held message go to Nova too, so the agent's own turn is found by its words.
+    // A person's next words hand the held message to Nova, so the agent is told Nova has it; its own turn is found by its words.
     const turnOn = (words: string) => agent.prompts.find((prompt) => prompt.endsWith(`: @${own.name} ${words}`));
     await chips.say(`@${own.name} what now`);
     await until(() => turnOn("what now") !== undefined);
     assert.match(
       turnOn("what now") ?? "",
-      /^Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held[^.]* until a person acts\. Until then, tell the person what is done and what is blocked, rather than asking the agents again\.\n\n/,
+      /^Your last message in this space was held from the agents it named until a person acted\. A person has now, so Chips has handed it to them: do not send it again\.\n\n/,
     );
     await until(() => chips.workspace.log.filter((event) => event.type === "run.completed").length >= 3);
 
