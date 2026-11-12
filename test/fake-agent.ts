@@ -3,7 +3,8 @@
  * over stdio. What it does with a prompt is written in the prompt's last line:
  *
  * - anything else: a thought, a tool call that reads a file, two chunks of words, a usage update
- *   with its cost, and `end_turn`;
+ *   with what the session has cost in all (0.02 more each time, kept across a restart and a load,
+ *   as Claude Code's total is), and `end_turn`;
  * - `ask`: it asks permission to run `npm test`, and says which option it was given; `ask edit`,
  *   the same to edit `notes.md`; `ask shell`, the same as Claude Code asks for a command: titled by
  *   the command, with its own words for it in `description` (`ask shell <command>` for another);
@@ -83,6 +84,8 @@ export interface FakeAgent {
   readonly sets: string[];
   /** How many times it was started. */
   starts: number;
+  /** What each session has cost in all, as it last said: it goes on across a restart. */
+  readonly spent: Map<string, number>;
 }
 
 export function fakeAgent(
@@ -116,6 +119,7 @@ export function fakeAgent(
     forks: [],
     closed: [],
     starts: 0,
+    spent: new Map(),
     wire: () => {
       agent.starts += 1;
       let listener: (line: string) => void = () => undefined;
@@ -415,7 +419,9 @@ export function fakeAgent(
         update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" });
         say("Here is ");
         say("the answer.");
-        usage(sessionId, last === "pause" ? 1300 : 1200, 0.02);
+        const total = (agent.spent.get(sessionId) ?? 0) + 0.02;
+        agent.spent.set(sessionId, total);
+        usage(sessionId, last === "pause" ? 1300 : 1200, total);
         await new Promise((resolve) => setTimeout(resolve, 20));
         reply("end_turn");
       };

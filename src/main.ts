@@ -102,6 +102,7 @@ const state: BridgeState = {
   agents: kept.agents ?? {},
   windows: kept.windows ?? {},
   ...(kept.models === undefined ? {} : { models: kept.models }),
+  costs: kept.costs ?? {},
 };
 // The agent's environment: this process's, the config's, and for Codex the room to read a whole AGENTS.md.
 const env = adapterEnv(kind, { ...process.env, ...kind.env });

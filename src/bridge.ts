@@ -173,6 +173,12 @@ export interface BridgeState {
   windows?: Record<string, KeptWindow>;
   /** What the agent offers to run on, as it said when the bridge last looked (Chips ADR 0241). */
   models?: Catalog;
+  /**
+   * What each session has cost in all, as the agent last said, by session: what its next turn's
+   * cost is counted from. Kept here, not only in memory, because Claude Code's total goes on across
+   * a restart: a bridge that forgot it took the session's whole cost for its next turn's.
+   */
+  costs?: Record<string, number>;
 }
 
 export interface BridgeOptions {
@@ -339,7 +345,9 @@ interface Turn {
   pausing: boolean;
   /** How many of its asks wait on a person: a Pause while one does stops nothing. */
   asking: number;
+  /** What the session had cost in all when the turn began; none when the bridge doesn't know. */
   costAtStart?: number | undefined;
+  /** What the session has cost in all, as the agent last said in the turn. */
   cost?: number | undefined;
   saidAt: number;
   gaugeAt: number;
@@ -377,8 +385,6 @@ interface CompactRun {
 export class Bridge {
   private readonly process: Process = { live: new Set(), stale: new Set(), stopping: false, failures: 0 };
   private readonly rooms = new Map<string, Room>();
-  /** The cost each session has run up, as the agent last said. */
-  private readonly costs = new Map<string, number>();
   private readonly log: (line: string) => void;
   /** What Chips asks waits for the agents to be known: they are read at start. */
   private readonly known: Promise<void>;
@@ -490,7 +496,13 @@ export class Bridge {
   }
 
   private save(): void {
-    this.options.saveState(this.options.state);
+    const { state } = this.options;
+    // A session no room has any more needs no cost kept.
+    if (state.costs !== undefined) {
+      const kept = new Set(Object.values(state.sessions));
+      for (const sessionId of Object.keys(state.costs)) if (!kept.has(sessionId)) delete state.costs[sessionId];
+    }
+    this.options.saveState(state);
   }
 
   /** One record made at a time. */
@@ -1137,7 +1149,7 @@ export class Bridge {
       return;
     }
     const { sessionId } = turn;
-    turn.costAtStart = this.costs.get(sessionId);
+    turn.costAtStart = this.options.state.costs?.[sessionId];
 
     const project = await this.projectFor(turn, record, spaceId, speakerId ?? record.agentId);
     const asked = {
@@ -1269,6 +1281,8 @@ export class Bridge {
     await this.moded(client, made.sessionId);
     await this.modelled(client, record, made.sessionId);
     state.sessions[key] = made.sessionId;
+    // A new session has cost nothing yet: its first turn counts from nought.
+    (state.costs ??= {})[made.sessionId] = 0;
     this.save();
     return made.sessionId;
   }
@@ -1324,6 +1338,25 @@ export class Bridge {
     return lines;
   }
 
+  /**
+   * What the turn cost. ACP says what a session has cost in all, not its tokens (Chips ADR 0162):
+   * the turn's cost is what that grew by while it ran. With nothing to count from (a session from
+   * before the bridge kept its costs, or whose count was lost), or where the total went down, the
+   * turn says it ran without saying a cost rather than give the session's whole cost as its own;
+   * the next turn counts from what this one ended at.
+   */
+  private async sayCost(room: Room, turn: Turn, total: number): Promise<void> {
+    const { run, costAtStart } = turn;
+    const spent = costAtStart === undefined ? undefined : total - costAtStart;
+    if (spent !== undefined && spent >= 0) {
+      if (spent > 0) await run.usage({ model: turn.agentName, costUsd: spent }).catch(() => undefined);
+      return;
+    }
+    const why = costAtStart === undefined ? "nothing to count it from" : "the session's total went down";
+    this.log(`${room.record.name}'s turn says no cost: ${why} ($${total.toFixed(2)} in all now)`);
+    await run.usage({ model: turn.agentName }).catch(() => undefined);
+  }
+
   /** The turn is over: its words in the room, what it cost, and the run ended as it went. */
   private async finish(room: Room, turn: Turn, stop: string): Promise<void> {
     const { run } = turn;
@@ -1332,11 +1365,7 @@ export class Bridge {
     for (const approvalId of turn.allowed.values()) {
       await run.executed(approvalId, "executed", "The agent didn't say how it went.").catch(() => undefined);
     }
-    const spent = (turn.cost ?? 0) - (turn.costAtStart ?? 0);
-    if (turn.cost !== undefined && spent > 0) {
-      // ACP says what a session has cost, not its tokens: the cost alone (Chips ADR 0162).
-      await run.usage({ model: turn.agentName, costUsd: spent }).catch(() => undefined);
-    }
+    if (turn.cost !== undefined) await this.sayCost(room, turn, turn.cost);
     if (stop === "refusal") {
       await run.fail({ error: `${room.record.name} refused.` });
       return;
@@ -1474,7 +1503,8 @@ export class Bridge {
   private costed(sessionId: string, update: SessionUpdate): void {
     const cost = update["cost"] as { amount?: unknown; currency?: unknown } | undefined;
     if (typeof cost?.amount !== "number" || (cost.currency !== undefined && cost.currency !== "USD")) return;
-    this.costs.set(sessionId, cost.amount);
+    (this.options.state.costs ??= {})[sessionId] = cost.amount;
+    this.save();
     const turn = this.turnOf(sessionId);
     if (turn !== undefined) turn.cost = cost.amount;
   }

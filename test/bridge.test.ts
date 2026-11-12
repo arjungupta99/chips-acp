@@ -113,6 +113,15 @@ function sent(
   );
 }
 
+/** What the turn a message began said it cost, to the millionth of a dollar; none when it said none. */
+async function costOf(chips: FakeChips, text: string): Promise<number | undefined> {
+  await chips.say(text);
+  const started = await sent(chips, "run.started", (event) => event.payload["goal"] === text);
+  const usage = await sent(chips, "usage", (event) => event.run_id === started.run_id);
+  const cost = usage.payload["cost"] as { usd: number } | undefined;
+  return cost === undefined ? undefined : Math.round(cost.usd * 1e6) / 1e6;
+}
+
 /** The record of an agent the bridge keeps, by its name. */
 function recordNamed(state: BridgeState, name: string) {
   return Object.values(state.agents).find((record) => record.name === name);
@@ -1196,6 +1205,46 @@ describe("an agent that stops", () => {
     );
     assert.equal(agent.made.length, 1, "no second session");
     assert.deepEqual(agent.loaded, agent.made, "the first one, loaded");
+    again.bridge.stop();
+  });
+
+  it("counts each turn's cost from what its session had cost, after a restart too", async () => {
+    const chips = await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" });
+    open.push(() => chips.close());
+    const agent = fakeAgent({ loadSession: true });
+    const state: BridgeState = { sessions: {}, agents: {} };
+    const folders = mkdtempSync(join(tmpdir(), "chips-acp-"));
+    const first = await rig({ chips, agent, state, folders });
+    assert.equal(await costOf(chips, "one"), 0.02);
+    assert.equal(await costOf(chips, "two"), 0.02, "what the session added, not its total");
+    assert.deepEqual(Object.keys(state.costs ?? {}), Object.values(state.sessions), "a cost kept for each room's session");
+    first.bridge.stop();
+    first.client.close();
+
+    const again = await rig({ chips, agent, state, folders });
+    assert.equal(await costOf(chips, "three"), 0.02, "not the $0.06 the session has cost in all");
+    assert.deepEqual(agent.loaded, agent.made, "the same session, loaded");
+    again.bridge.stop();
+  });
+
+  it("says no cost for a turn with nothing to count from, rather than its session's whole cost", async () => {
+    const chips = await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" });
+    open.push(() => chips.close());
+    const agent = fakeAgent({ loadSession: true });
+    const state: BridgeState = { sessions: {}, agents: {} };
+    const folders = mkdtempSync(join(tmpdir(), "chips-acp-"));
+    const first = await rig({ chips, agent, state, folders });
+    await costOf(chips, "one");
+    await costOf(chips, "two");
+    first.bridge.stop();
+    first.client.close();
+    // As a bridge from before it kept its costs left its state.
+    delete state.costs;
+
+    const again = await rig({ chips, agent, state, folders });
+    assert.equal(await costOf(chips, "three"), undefined, "no cost said, not the session's $0.06");
+    assert.ok(again.logs.some((line) => line.includes("says no cost: nothing to count it from")));
+    assert.equal(await costOf(chips, "four"), 0.02, "counted from what the turn before ended at");
     again.bridge.stop();
   });
 
