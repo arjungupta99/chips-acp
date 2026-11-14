@@ -19,7 +19,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
+import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep, runsKept } from "@chipschat/harness";
 import { processWire } from "./acp.js";
 import { forgetAdapter, readyAdapter, withFetchedAdapter } from "./adapter.js";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
@@ -107,12 +107,23 @@ const state: BridgeState = {
 // The agent's environment: this process's, the config's, and for Codex the room to read a whole AGENTS.md.
 const env = adapterEnv(kind, { ...process.env, ...kind.env });
 
+// Each try that fails is told here, every few seconds: said once, and again when the reason
+// changes, so a server down for a night is a line in the log and not thousands.
+let waitingFor: string | undefined;
+const waitingSaid = (why: string) => {
+  if (why !== waitingFor) log(`waiting for Chips: ${why}`);
+  waitingFor = why;
+};
 let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
   client: { name: "chips-acp", version: VERSION },
   store: fileStore(join(folder, "chips-state.json")),
+  // The copy this machine keeps running starts at login, perhaps before its server is up: it waits
+  // and tries again, where a run by hand hears at once that Chips can't be reached.
+  waitForServer: runsKept(LABEL),
+  onWaiting: waitingSaid,
   onRestart: async () => {
     log("a person asked for a restart");
     await bridge?.restart();
