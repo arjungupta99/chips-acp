@@ -13,7 +13,8 @@ export type Layer = Readonly<Record<string, unknown>>;
 const isRecord = (value: unknown): value is Layer =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-function readLayer(path: string): Layer | undefined {
+/** One settings file, as a layer; nothing where it isn't there or isn't an object of JSON. */
+export function readLayer(path: string): Layer | undefined {
   if (!existsSync(path)) return undefined;
   try {
     const read = JSON.parse(readFileSync(path, "utf8")) as unknown;

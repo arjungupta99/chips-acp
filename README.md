@@ -124,6 +124,10 @@ its asks). Then nothing reaches Chips as a card. Put them where they ask:
   does without asking, and read-only commands never ask.
 - Codex in `workspace-write` changes its folder freely and asks before the network or anything
   outside it. `read-only` asks before any change.
+- The bridge tells Chips what those settings let through (Chips ADR 0299), for the harness's
+  Permissions page: Claude Code's `permissions` lists from your settings and each agent's folder,
+  and the mode; for Codex, its mode. It reads them and never writes them. Needs Chips SDK 1.0.10;
+  on an older one nothing is sent.
 
 ## Live
 

@@ -95,10 +95,11 @@ import {
   type SessionUpdate,
   type Wire,
 } from "./acp.js";
-import { settingsLayers } from "./claude-settings.js";
+import { readLayer, settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
 import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
+import { claudeOwnRules, codexOwnRules, type OwnRules, type PlacedLayer, sendOwnRules } from "./own-rules.js";
 import { VERSION } from "./version.js";
 import {
   type Catalog,
@@ -462,6 +463,7 @@ export class Bridge {
     this.knew();
     // What each agent is built from, how full it last said it was, and what it runs on (Chips ADRs 0134, 0146, 0241).
     await this.sendContexts();
+    await this.sendOwnRules();
     for (const record of this.records()) await this.sendWindow(record);
     await this.sendModels();
     await this.run();
@@ -1590,7 +1592,37 @@ export class Bridge {
   /** The agents came or went: the copies sent again where they changed (Chips takes the same copy once). */
   private agentsChanged(): void {
     if (this.files !== undefined) void this.sendContexts();
+    void this.sendOwnRules();
     void this.sendModels();
+  }
+
+  /**
+   * What its own settings let through without asking (Chips ADR 0299), read again with the agents'
+   * folders: Claude Code's lists, Codex's mode. Chips takes the same copy once; an older Chips, or
+   * an SDK before 1.0.10, takes none, and nothing else changes.
+   */
+  private async sendOwnRules(): Promise<void> {
+    const copy = this.ownRules();
+    if (copy !== undefined) await sendOwnRules(this.options.chips.settings, copy);
+  }
+
+  private ownRules(): OwnRules | undefined {
+    if (this.knownKind === "codex") return codexOwnRules(this.options.kind.mode ?? "workspace-write");
+    if (this.knownKind !== "claude-code") return undefined;
+    const userPath = join(this.places.claudeHome, "settings.json");
+    const folders = [...new Set(this.records().map((record) => record.folder))].flatMap((folder): PlacedLayer[] =>
+      [join(folder, ".claude", "settings.json"), join(folder, ".claude", "settings.local.json")].flatMap((path) => {
+        const layer = readLayer(path);
+        return layer === undefined ? [] : [{ path, layer }];
+      }),
+    );
+    return claudeOwnRules({
+      userPath,
+      user: readLayer(userPath),
+      folders,
+      mode: this.options.kind.mode ?? "default",
+      home: this.places.home,
+    });
   }
 
   /** The harness's own set and each agent's files, as they are on disk now. */
