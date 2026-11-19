@@ -22,8 +22,9 @@ import {
   optionFor,
   questionFor,
   titleFrom,
+  UNANSWERED,
 } from "../src/bridge.ts";
-import { type FakeAgent, fakeAgent } from "./fake-agent.ts";
+import { type FakeAgent, fakeAgent, PLAN_OPTIONS, PLAN_OPTIONS_BARE } from "./fake-agent.ts";
 
 const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "restarts"];
 
@@ -887,30 +888,152 @@ describe("what it asks", () => {
     assert.equal(questionFor(long, { command: long }).length, 200);
   });
 
-  it("gives the agent its always when a person allows always for what is not a command", async () => {
+  it("gives an Always to the agent as once for what is not a command too, while Chips keeps the rule", async () => {
     const { chips } = await rig();
     await chips.say("ask edit");
     const asked = await sent(chips, "approval.request");
     await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
     const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
-    assert.equal(words.payload["text"], "Given: always");
+    // Chips wrote the rule. An always the agent kept too would outlive that rule being switched off.
+    assert.equal(words.payload["text"], "Given: once");
   });
 
-  it("gives a command's Always to the agent as its own always when the harness keeps it (Chips ADR 0300)", () => {
+  it("gives an Always to the agent as its own always only when the harness keeps it (Chips ADR 0300)", () => {
     const options = [
       { optionId: "once", kind: "allow_once" },
       { optionId: "always", kind: "allow_always" },
       { optionId: "no", kind: "reject_once" },
     ];
-    const always = { allowed: true, scope: "always" } as Parameters<typeof optionFor>[0];
-    const kept = { ...always, keeps: "harness" } as Parameters<typeof optionFor>[0];
-    // Chips's rules on: Chips keeps a command's Always, so the agent is told once.
-    assert.equal(optionFor(always, options, true), "once");
+    const always = decisionOf({ scope: "always" });
+    const kept = decisionOf({ scope: "always", keeps: "harness" });
+    // Chips's rules on: Chips keeps the Always, a command's or not, so the agent is told once.
+    assert.equal(optionFor(always, options, false), "once");
+    assert.equal(optionFor(decisionOf({ scope: "session" }), options, false), "once");
+    assert.equal(optionFor(decisionOf({ scope: "once" }), options, false), "once");
     // Off: the harness keeps it, in its own settings.
-    assert.equal(optionFor(kept, options, true), "always");
     assert.equal(optionFor(kept, options, false), "always");
-    assert.equal(optionFor({ ...kept, scope: "once" } as Parameters<typeof optionFor>[0], options, true), "once");
-    assert.equal(optionFor({ ...kept, allowed: false } as Parameters<typeof optionFor>[0], options, true), "no");
+    assert.equal(optionFor(decisionOf({ scope: "once", keeps: "harness" }), options, false), "once");
+    assert.equal(optionFor(decisionOf({ scope: "always", keeps: "harness", allowed: false }), options, false), "no");
+    // An agent with no always to keep it in is told once.
+    const plain = options.filter((option) => option.kind !== "allow_always");
+    assert.equal(optionFor(kept, plain, false), "once");
+    // One that offers no once has only its always for a yes.
+    const noOnce = options.filter((option) => option.kind !== "allow_once");
+    assert.equal(optionFor(always, noOnce, false), "always");
+    assert.equal(optionFor(decisionOf({ scope: "once" }), noOnce, false), "always");
+  });
+
+  it("never answers a plan ask with a change of mode, whatever a person's Always means to Chips", () => {
+    const kept = decisionOf({ scope: "always", keeps: "harness" });
+    // Claude Code's own options: three always, each a mode ("auto mode", "bypass permissions").
+    assert.deepEqual(
+      PLAN_OPTIONS.filter((option) => option.kind === "allow_always").map((option) => option.optionId),
+      ["exit-plan-clear-auto", "exit-plan-auto", "exit-plan-bypass"],
+    );
+    for (const decision of [kept, decisionOf({ scope: "always" }), decisionOf({ scope: "once" })]) {
+      assert.equal(optionFor(decision, PLAN_OPTIONS, true), "exit-plan-default");
+      // The one always of a session with neither mode is a mode all the same: auto-accept edits.
+      assert.equal(optionFor(decision, PLAN_OPTIONS_BARE, true), "exit-plan-default");
+    }
+    assert.equal(optionFor(decisionOf({ allowed: false }), PLAN_OPTIONS, true), "reject");
+    // Several always on a call that isn't marked a change of mode: none is "the" always.
+    assert.equal(optionFor(kept, PLAN_OPTIONS, false), "exit-plan-default");
+    // And with no once to give, a yes picks nothing rather than a mode.
+    const modesOnly = PLAN_OPTIONS.filter((option) => option.kind !== "allow_once");
+    assert.equal(optionFor(kept, modesOnly, true), undefined);
+    assert.equal(optionFor(kept, modesOnly, false), undefined);
+    assert.equal(optionFor(kept, PLAN_OPTIONS_BARE.filter((option) => option.kind !== "allow_once"), true), undefined);
+  });
+
+  it("answers Claude Code's plan ask with its once when a person allows always", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("ask plan");
+    const asked = await sent(chips, "approval.request");
+    assert.equal((asked.payload["action"] as { kind: string }).kind, "acp.switch_mode");
+    await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: exit-plan-default");
+    assert.deepEqual(agent.given, ["exit-plan-default"]);
+  });
+
+  it("gives the agent its own always, heard from Chips, when Chips says the harness keeps it", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("ask edit");
+    const asked = await sent(chips, "approval.request");
+    await keptAlways(chips, asked);
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: always");
+    // A command's too (Chips ADR 0300).
+    await chips.say("ask");
+    const next = await sent(chips, "approval.request", (event) => event.run_id !== asked.run_id);
+    await keptAlways(chips, next);
+    await sent(chips, "run.completed", (event) => event.run_id === next.run_id);
+    assert.deepEqual(agent.given, ["always"]);
+  });
+
+  it("answers Claude Code's plan ask with its once even when Chips says the harness keeps the Always", async () => {
+    for (const script of ["ask plan", "ask plan bare"]) {
+      const { chips, agent } = await rig();
+      await chips.say(script);
+      const asked = await sent(chips, "approval.request");
+      await keptAlways(chips, asked);
+      await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+      assert.deepEqual(agent.given, ["exit-plan-default"], script);
+    }
+  });
+
+  it("ends the turn on one line when nobody answers an ask, and hands the agent no answer", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("ask");
+    const asked = await sent(chips, "approval.request");
+    await expire(chips, asked);
+    await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    // Not a no, which the agent would take as "try another way": its ask is let go and its prompt stopped.
+    assert.deepEqual(agent.given, ["cancelled"]);
+    assert.deepEqual(agent.cancels, agent.made, "its prompt, stopped");
+    assert.deepEqual(postsIn(chips, asked.run_id), [UNANSWERED]);
+    assert.equal(UNANSWERED, "Nobody answered, so I stopped. Ask me to carry on.");
+    assert.deepEqual(endsOf(chips, asked.run_id), ["run.completed"]);
+    assert.equal(agent.prompts.length, 1, "nothing more is asked of it");
+  });
+
+  it("says that one line whatever the agent says as it stops", async () => {
+    const { chips } = await rig();
+    // This script takes the let-go ask as an answer and says "Given nothing".
+    await chips.say("ask edit");
+    const asked = await sent(chips, "approval.request");
+    await expire(chips, asked);
+    await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    assert.deepEqual(postsIn(chips, asked.run_id), [UNANSWERED]);
+  });
+
+  it("lets go of every ask of the turn when one expires, with one line for them all", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("ask two");
+    const first = await sent(chips, "approval.request");
+    await until(() => chips.workspace.log.filter((event) => event.type === "approval.request").length === 2);
+    await expire(chips, first);
+    await sent(chips, "run.completed", (event) => event.run_id === first.run_id);
+    assert.deepEqual(agent.given, ["cancelled", "cancelled"]);
+    assert.deepEqual(postsIn(chips, first.run_id), [UNANSWERED]);
+    // The other card's own expiry, an instant later, finds the turn over and changes nothing.
+    const second = chips.workspace.log.filter((event) => event.type === "approval.request")[1] as StoredEvent;
+    await expire(chips, second);
+    await quiet();
+    assert.deepEqual(postsIn(chips, first.run_id), [UNANSWERED]);
+    assert.equal(agent.cancels.length, 1, "stopped once");
+  });
+
+  it("takes the next message as a new turn after an ask nobody answered", async () => {
+    const { chips, agent } = await rig();
+    await chips.say("ask");
+    const asked = await sent(chips, "approval.request");
+    await expire(chips, asked);
+    await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    await chips.say("hello");
+    const next = await sent(chips, "run.completed", (event) => event.run_id !== asked.run_id);
+    assert.deepEqual(postsIn(chips, next.run_id), ["Here is the answer."]);
+    assert.equal(new Set(agent.promptedIn).size, 1, "the same session, which holds what it was doing");
   });
 
   it("gives it its reject when a person says no", async () => {
@@ -960,6 +1083,44 @@ describe("what a person does to it", () => {
 const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
 
 /** A run's address, for what a person sends it. */
+/** A decision as the SDK hands one over, approved once unless said otherwise. */
+function decisionOf(given: { allowed?: boolean; scope?: "once" | "session" | "always"; keeps?: "harness" }): Parameters<typeof optionFor>[0] {
+  const allowed = given.allowed ?? true;
+  return {
+    approvalId: "approval-1",
+    decision: allowed ? "approved" : "denied",
+    allowed,
+    scope: given.scope ?? "once",
+    ...(given.keeps === undefined ? {} : { keeps: given.keeps }),
+    input: {},
+    by: "person-1",
+    at: "2026-11-19T00:00:00.000Z",
+  } as unknown as Parameters<typeof optionFor>[0];
+}
+
+/** A person's Always on an ask of a harness whose Chips's rules are off: Chips writes no rule and says the harness keeps it (Chips ADR 0300). */
+function keptAlways(chips: FakeChips, asked: StoredEvent): Promise<StoredEvent> {
+  return chips.asOwner({
+    ...runOf(asked),
+    type: "approval.resolved",
+    approval_id: String(asked.payload["approval_id"]),
+    decision: "approved",
+    scope: "always",
+    keeps: "harness",
+  });
+}
+
+/** An ask's hour runs out with nobody's answer: Chips resolves it `expired`. */
+function expire(chips: FakeChips, asked: StoredEvent): Promise<StoredEvent> {
+  return chips.asOwner({
+    ...runOf(asked),
+    type: "approval.resolved",
+    approval_id: String(asked.payload["approval_id"]),
+    decision: "expired",
+    scope: "once",
+  });
+}
+
 function runOf(started: StoredEvent): { space_id: string | null; run_id: string | null } {
   return { space_id: started.space_id, run_id: started.run_id };
 }

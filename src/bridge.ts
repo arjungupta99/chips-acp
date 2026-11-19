@@ -231,6 +231,9 @@ const QUOTED = 1500;
 /** What a paused run's agent is told on Resume (Chips ADR 0293), before anything steered meanwhile. */
 const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
 
+/** What a turn ends on, in the room, when an ask of its expired with nobody's answer. */
+export const UNANSWERED = "Nobody answered, so I stopped. Ask me to carry on.";
+
 /** The agent's process: one for every agent of the kind, a session for each of their rooms. */
 interface Process {
   client?: AcpClient | undefined;
@@ -346,6 +349,10 @@ interface Turn {
   pausing: boolean;
   /** How many of its asks wait on a person: a Pause while one does stops nothing. */
   asking: number;
+  /** An ask of its expired with nobody's answer: the turn ends there, on `UNANSWERED`. */
+  unanswered: boolean;
+  /** Its asks that wait on a person, each let go with no answer when the turn ends without one. */
+  readonly letGo: Set<() => void>;
   /** What the session had cost in all when the turn began; none when the bridge doesn't know. */
   costAtStart?: number | undefined;
   /** What the session has cost in all, as the agent last said in the turn. */
@@ -1106,6 +1113,8 @@ export class Bridge {
       stopping: false,
       pausing: false,
       asking: 0,
+      unanswered: false,
+      letGo: new Set(),
       saidAt: 0,
       gaugeAt: 0,
       steps: new Map(),
@@ -1116,11 +1125,7 @@ export class Bridge {
     room.turn = turn;
     this.sayPausable(run, speakerId);
     // Stop, Pause and an interrupting steer all stop the prompt going, if one is: once, however many come.
-    const interrupt = () => {
-      if (!turn.prompting || turn.stopping) return;
-      turn.stopping = true;
-      this.process.client?.cancel(turn.sessionId);
-    };
+    const interrupt = () => this.interrupt(turn);
     // Heard from the start, so a Stop while the session is still opening stops it too.
     run.on("cancel", () => {
       turn.cancelled = true;
@@ -1208,6 +1213,11 @@ export class Bridge {
       turn.pausing = false;
       // Paused as it stopped, or just after: nothing is posted, and the run isn't ended, until Resume.
       if (!(await this.unpaused(turn))) return;
+      // An ask nobody answered ended it: one line says so, whatever the agent said as it stopped.
+      if (turn.unanswered) {
+        await this.finish(room, turn, "end_turn", UNANSWERED);
+        return;
+      }
       if (stop === "cancelled" && (paused || turn.next.length > 0)) {
         // Stopped partway, by a Pause or an interrupting steer. What it was in the middle of saying
         // is dropped, so the reply is what it says from here: one answer, not a half-sentence with
@@ -1220,6 +1230,26 @@ export class Bridge {
       prompt = turn.next.shift();
     }
     await this.finish(room, turn, stop);
+  }
+
+  /** The prompt going, if one is, told to stop (`session/cancel`): once, however many ask. */
+  private interrupt(turn: Turn): void {
+    if (!turn.prompting || turn.stopping) return;
+    turn.stopping = true;
+    this.process.client?.cancel(turn.sessionId);
+  }
+
+  /**
+   * An ask expired with nobody's answer, so the turn ends: its prompt is stopped, and every ask of
+   * its that still waits is let go with no answer, as ACP has for a stopped prompt. The agent is
+   * not told no. A no reads as "try another way", and its next try asks again, an hour later, all
+   * night. The turn ends on `UNANSWERED` once the prompt is back.
+   */
+  private giveUp(turn: Turn): void {
+    if (turn.unanswered) return;
+    turn.unanswered = true;
+    for (const letGo of [...turn.letGo]) letGo();
+    this.interrupt(turn);
   }
 
   /**
@@ -1359,8 +1389,11 @@ export class Bridge {
     await run.usage({ model: turn.agentName }).catch(() => undefined);
   }
 
-  /** The turn is over: its words in the room, what it cost, and the run ended as it went. */
-  private async finish(room: Room, turn: Turn, stop: string): Promise<void> {
+  /**
+   * The turn is over: its words in the room, what it cost, and the run ended as it went. With
+   * `instead`, those words are said in place of the agent's own.
+   */
+  private async finish(room: Room, turn: Turn, stop: string, instead?: string): Promise<void> {
     const { run } = turn;
     if (run.over) return;
     await this.settleSteps(turn, "done");
@@ -1373,7 +1406,7 @@ export class Bridge {
       return;
     }
     // Its last words; when it ended on a tool call, the words before it.
-    const answer = turn.reply.trim() || (turn.said.at(-1) ?? "");
+    const answer = instead ?? (turn.reply.trim() || (turn.said.at(-1) ?? ""));
     const { change, note } = await this.sendProject(room, turn, answer);
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
     const { chips } = this.options;
@@ -2188,8 +2221,9 @@ export class Bridge {
       name?: string;
     }[];
     if (turn === undefined) return { outcome: { outcome: "cancelled" } };
-    // Asked as its prompt was being stopped for a Pause: ACP has what it still asks answered cancelled.
-    if (turn.pausing) return { outcome: { outcome: "cancelled" } };
+    // Asked as its prompt was being stopped, for a Pause or an ask nobody answered: ACP has what it
+    // still asks answered cancelled.
+    if (turn.pausing || turn.unanswered) return { outcome: { outcome: "cancelled" } };
     const call = (params["toolCall"] ?? {}) as Record<string, unknown>;
     const kind = toolOf(call) ?? "other";
     const title = typeof call["title"] === "string" ? call["title"] : `use ${kind}`;
@@ -2206,7 +2240,11 @@ export class Bridge {
     });
     const decision = await this.answerOf(turn, asked);
     if (decision === undefined) return { outcome: { outcome: "cancelled" } };
-    const chosen = optionFor(decision, options, carriesCommand(input));
+    if (decision.decision === "expired") {
+      this.giveUp(turn);
+      return { outcome: { outcome: "cancelled" } };
+    }
+    const chosen = optionFor(decision, options, call["kind"] === "switch_mode");
     if (decision.allowed && chosen !== undefined && call["toolCallId"] !== undefined) {
       turn.allowed.set(String(call["toolCallId"]), decision.approvalId);
     }
@@ -2243,18 +2281,26 @@ export class Bridge {
   /**
    * A person's answer to what the agent asked, once the agent may have it: one given while the run
    * is paused waits for Resume (Chips ADR 0293), and a Stop, before the answer or while it waits,
-   * leaves none. While an ask waits, a Pause stops nothing.
+   * leaves none. Nor does a turn that ended on another ask nobody answered (`giveUp`). While an ask
+   * waits, a Pause stops nothing.
    */
   private async answerOf<T>(turn: Turn, asked: Promise<T>): Promise<T | undefined> {
     let off = (): void => undefined;
     const stopped = new Promise<undefined>((resolve) => {
-      off = turn.run.on("cancel", () => resolve(undefined));
+      const letGo = (): void => resolve(undefined);
+      const unheard = turn.run.on("cancel", letGo);
+      turn.letGo.add(letGo);
+      off = () => {
+        unheard();
+        turn.letGo.delete(letGo);
+      };
     });
     turn.asking += 1;
     try {
       const answer = await Promise.race([asked, stopped]);
       if (answer === undefined) return undefined;
-      return (await this.unpaused(turn)) ? answer : undefined;
+      if (!(await this.unpaused(turn))) return undefined;
+      return turn.unanswered ? undefined : answer;
     } finally {
       off();
       turn.asking -= 1;
@@ -2419,31 +2465,33 @@ function riskOf(kind: string): RiskClass[] {
 }
 
 /**
- * The agent's option for a decision: always where it was allowed always and it has one. A
- * command's Always is the agent's once while Chips keeps it (Chips ADR 0239): Chips remembers it
- * by how each part starts and answers the next ask itself, where the agent's own always would let
- * through more. With the harness's Chips's rules off, Chips keeps nothing and says the harness
- * keeps it (`keeps: "harness"`, Chips ADR 0300), so a command's Always is the agent's own always.
+ * The agent's option for a decision.
+ *
+ * A yes is the agent's once, an Always too, while Chips keeps the rule (Chips ADR 0239): Chips
+ * remembers it and answers the next ask itself, so switching that rule off in Chips brings the
+ * asks back. An always the agent kept as well would be a second copy Chips can't see or remove.
+ *
+ * With the harness's Chips's rules off, Chips keeps nothing and says the harness keeps it
+ * (`keeps: "harness"`, Chips ADR 0300). The Always is then the agent's own always, but only where
+ * the ask offers exactly one and the call doesn't change the session's mode (`changesMode`, ACP's
+ * `switch_mode`). Claude Code's plan ask marks "Yes, clear context and use auto mode" and "Yes,
+ * and bypass permissions" as `allow_always`; an Always in Chips means "don't ask me this again",
+ * never "stop asking me". Such an ask is answered with its once.
+ *
+ * An agent that offers no once is given its one always for a yes, on the same terms. Where there
+ * is no such option either, nothing is picked and the ask is answered cancelled.
  */
 export function optionFor(
   decision: Decision,
   options: readonly { optionId: string; kind: string }[],
-  command: boolean,
+  changesMode: boolean,
 ): string | undefined {
   const find = (kind: string) => options.find((option) => option.kind === kind)?.optionId;
   if (!decision.allowed) return find("reject_once") ?? find("reject_always");
-  const harnessKeeps = (decision as { readonly keeps?: string }).keeps === "harness";
-  if (decision.scope === "always" && (!command || harnessKeeps)) {
-    return find("allow_always") ?? find("allow_once");
-  }
-  return find("allow_once") ?? find("allow_always");
-}
-
-/** Whether a tool call's input carries a command, as a shell runs it: a string or its words. */
-function carriesCommand(input: unknown): boolean {
-  if (typeof input !== "object" || input === null) return false;
-  const command = (input as Record<string, unknown>)["command"];
-  return typeof command === "string" || Array.isArray(command);
+  const always = options.filter((option) => option.kind === "allow_always");
+  const ownAlways = always.length === 1 && !changesMode ? always[0]?.optionId : undefined;
+  if (decision.scope === "always" && decision.keeps === "harness" && ownAlways !== undefined) return ownAlways;
+  return find("allow_once") ?? ownAlways;
 }
 
 function questionOf(

@@ -61,6 +61,26 @@ export interface FakeModels {
   readonly refuses?: readonly string[];
 }
 
+/**
+ * The options Claude Code's adapter gives its plan ask, in its order
+ * (`buildExitPlanModePermissionOptions`, @agentclientprotocol/claude-agent-acp 0.90.0): for a
+ * session that offers auto mode and Bypass permissions and was in neither before the plan.
+ */
+export const PLAN_OPTIONS = [
+  { optionId: "exit-plan-clear-auto", name: "Yes, clear context (41% used) and use auto mode", kind: "allow_always" },
+  { optionId: "exit-plan-auto", name: "Yes, and use auto mode", kind: "allow_always" },
+  { optionId: "exit-plan-bypass", name: "Yes, and bypass permissions", kind: "allow_always" },
+  { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+  { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+] as const;
+
+/** The same ask of a session that offers neither mode, with no plan to clear the context for: one always. */
+export const PLAN_OPTIONS_BARE = [
+  { optionId: "exit-plan-accept-edits", name: "Yes, auto-accept edits", kind: "allow_always" },
+  { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+  { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+] as const;
+
 export interface FakeAgent {
   readonly wire: () => Wire;
   readonly prompts: string[];
@@ -339,7 +359,55 @@ export function fakeAgent(
           });
           const outcome = answer["outcome"] as { outcome: string; optionId?: string };
           agent.given.push(outcome.optionId ?? outcome.outcome);
+          // Told to stop while its ask waited: ACP has the ask answered cancelled and the prompt end so.
+          if (outcome.outcome === "cancelled" && cancelled.delete(sessionId)) {
+            reply("cancelled");
+            return;
+          }
           say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
+          reply("end_turn");
+          return;
+        }
+        if (last === "ask plan" || last === "ask plan bare") {
+          // Claude Code's plan ask (ExitPlanMode), with the options its adapter gives it:
+          // `buildExitPlanModePermissionOptions` in @agentclientprotocol/claude-agent-acp 0.90.0.
+          const answer = await ask("session/request_permission", {
+            sessionId,
+            toolCall: {
+              toolCallId: "t5",
+              title: "Ready to code?",
+              kind: "switch_mode",
+              rawInput: { plan: "1. Read the notes.\n2. Write the page." },
+            },
+            options: last === "ask plan" ? PLAN_OPTIONS : PLAN_OPTIONS_BARE,
+          });
+          const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+          agent.given.push(outcome.optionId ?? outcome.outcome);
+          say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
+          reply("end_turn");
+          return;
+        }
+        if (last === "ask two") {
+          // Two calls asked at once, as Claude Code asks for tools it runs side by side.
+          const read = (toolCallId: string, path: string) =>
+            ask("session/request_permission", {
+              sessionId,
+              toolCall: { toolCallId, title: `Read ${path}`, kind: "read", rawInput: { path } },
+              options: [
+                { optionId: "once", name: "Allow once", kind: "allow_once" },
+                { optionId: "no", name: "Reject", kind: "reject_once" },
+              ],
+            });
+          const answers = await Promise.all([read("t6", "a.md"), read("t7", "b.md")]);
+          for (const answer of answers) {
+            const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+            agent.given.push(outcome.optionId ?? outcome.outcome);
+          }
+          if (cancelled.delete(sessionId)) {
+            reply("cancelled");
+            return;
+          }
+          say(`Given: ${agent.given.slice(-2).join(", ")}`);
           reply("end_turn");
           return;
         }
