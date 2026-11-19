@@ -32,6 +32,8 @@ interface Known {
    */
   readonly installedIn: string;
   readonly mode: string;
+  /** The modes a person may pick in Chips for its sessions, `mode` among them, in their order. */
+  readonly modes: readonly KindMode[];
   /** What a person does to sign it in, in a terminal, and on a machine with no screen where that differs. */
   readonly signIn: string;
   readonly signInNoScreen?: string;
@@ -41,6 +43,47 @@ interface Known {
 }
 
 const SIGN_IN_DOING = "Run this in Terminal, then try again. Your browser opens to sign in.";
+
+/**
+ * A mode a person may pick in Chips for a kind's sessions (Chips ADR 0300, addendum of 19 November
+ * 2026), as Chips's `own_rules.modes` offers it: its id on the wire, its name, a plain line, and
+ * whether the agent never asks in it.
+ */
+export interface KindMode {
+  readonly id: string;
+  readonly name: string;
+  readonly words: string;
+  readonly everything?: true | undefined;
+}
+
+/**
+ * Claude Code's, as its adapter offers them. Plan is left out: it is a way to work on one task, not
+ * how much it may do, and Claude Code asks before it leaves it. Its adapter offers Bypass
+ * permissions only where it may (not as root outside a sandbox, nor where settings turn it off).
+ */
+const CLAUDE_MODES: readonly KindMode[] = [
+  { id: "default", name: "Default", words: "Asks before edits and commands its settings don't allow." },
+  { id: "acceptEdits", name: "Accept edits", words: "Edits files without asking. Commands still ask." },
+  { id: "auto", name: "Auto", words: "Claude Code judges each step and asks only when one looks risky." },
+  { id: "bypassPermissions", name: "Bypass permissions", words: "Never asks. Whatever it does just happens.", everything: true },
+];
+
+/** Codex's, as codex-acp offers them. */
+const CODEX_MODES: readonly KindMode[] = [
+  { id: "read-only", name: "Read-only", words: "Reads on its own. Asks before it changes a file or runs anything else." },
+  {
+    id: "workspace-write",
+    name: "Workspace access",
+    words: "Edits and runs commands in the agent's folder. Asks before the network or anything outside it.",
+  },
+  { id: "agent", name: "Auto review", words: "Codex judges each step and asks only when one looks risky." },
+  {
+    id: "agent-full-access",
+    name: "Full access",
+    words: "Never asks. Reaches the network and any file on this computer.",
+    everything: true,
+  },
+];
 
 const KNOWN: readonly Known[] = [
   {
@@ -54,6 +97,7 @@ const KNOWN: readonly Known[] = [
     installLine: "curl -fsSL https://claude.ai/install.sh | bash",
     installedIn: ".local/bin",
     mode: "default",
+    modes: CLAUDE_MODES,
     signIn: "run `claude auth login`",
     signInLine: "claude auth login",
     signInDoing: SIGN_IN_DOING,
@@ -69,6 +113,7 @@ const KNOWN: readonly Known[] = [
     installLine: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
     installedIn: ".local/bin",
     mode: "workspace-write",
+    modes: CODEX_MODES,
     signIn: "run `codex login`",
     // Over SSH no browser opens, and the address `codex login` prints calls back to that machine.
     signInNoScreen: "`codex login --device-auth`",
@@ -87,6 +132,17 @@ const knownBy = (kind: KindConfig) => {
   const program = kind.command[0]?.split("/").pop();
   return KNOWN.find((each) => each.program === program);
 };
+
+/**
+ * The modes a person may pick for a kind's sessions from Chips: a kind this bridge knows by name,
+ * started in the mode it knows it by. One run from a config of its own, or in another mode, offers
+ * none, and Chips shows its mode as a row it can't change.
+ */
+export function modesOf(kind: KindConfig): readonly KindMode[] {
+  const known = knownBy(kind);
+  if (known === undefined || kind.mode !== known.mode) return [];
+  return known.modes;
+}
 
 /** What this bridge knows of the kind a config runs, for getting its adapter (`adapter.ts`). */
 export const knownOf = (kind: KindConfig): Known | undefined => knownBy(kind);

@@ -98,7 +98,8 @@ import {
 import { readLayer, settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
-import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, signedOutWords } from "./kinds.js";
+import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, modesOf, signedOutWords } from "./kinds.js";
+import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, pickedMode, withCurrent } from "./modes.js";
 import { claudeOwnRules, codexOwnRules, type OwnRules, type PlacedLayer, sendOwnRules } from "./own-rules.js";
 import { VERSION } from "./version.js";
 import {
@@ -431,6 +432,14 @@ export class Bridge {
   private readonly windowTimers = new Map<string, NodeJS.Timeout>();
   /** Each live session's options as the agent last said them: its model and effort among them. */
   private readonly sessionOptions = new Map<string, readonly ConfigOption[]>();
+  /** The modes its agent last said it offers, from any session (Chips ADR 0300): its `mode` option. */
+  private offered: readonly string[] | undefined;
+  /** The mode its sessions last ran in, of those a person may pick, as the agent said it. */
+  private modeNow: string | undefined;
+  /** The mode each session's agent said it went into while the bridge was moving it, by session. */
+  private readonly modeSaid = new Map<string, string>();
+  /** What it runs on its own, to send again in a moment: a mode change moves every session at once. */
+  private ownRulesTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -466,6 +475,8 @@ export class Bridge {
     chips.on("feedback", (feedback) => after("a second look", () => this.lookAgain(feedback)));
     chips.on("event", (event) => after(event.type, () => this.noted(event)));
     chips.onSpaceAsked((asked) => after("a room from the +", () => this.claim(asked)));
+    // A mode a person picked in Chips, or its end (Chips ADR 0300): every live session moves to it.
+    onModeChange(chips, () => after("a mode", () => this.remode()));
     await this.know(await chips.agents.list(), { forget: true });
     this.knew();
     // What each agent is built from, how full it last said it was, and what it runs on (Chips ADRs 0134, 0146, 0241).
@@ -1344,13 +1355,85 @@ export class Bridge {
     return settings === undefined ? undefined : { claudeCode: { options: { settings } } };
   }
 
-  /** The session into the mode the config names, or left in its own when the agent won't. */
+  /**
+   * The session into its mode: the one a person picked in Chips while it holds, where this kind
+   * offers it and the agent has it, else the one the config names (Chips ADR 0300). One the agent
+   * refuses goes back to the config's; one it refuses too leaves it in its own.
+   */
   private async moded(client: AcpClient, sessionId: string): Promise<void> {
-    const { mode, name } = this.options.kind;
-    if (mode === undefined) return;
-    await client
-      .setMode(sessionId, mode)
-      .catch((error: unknown) => this.log(`${name} stays in its own mode, not ${mode}: ${messageOf(error)}`));
+    const { mode: base, name } = this.options.kind;
+    if (base === undefined) return;
+    const offered = offeredIn(this.sessionOptions.get(sessionId));
+    if (offered !== undefined && offered.join() !== this.offered?.join()) {
+      this.offered = offered;
+      this.ownRulesSoon();
+    }
+    const target = modeTarget(base, modesOf(this.options.kind), pickedMode(this.options.chips), offered ?? this.offered);
+    if (target.why !== undefined) this.log(`${name} runs in ${base}: ${target.why}`);
+    if (await this.setModeOf(client, sessionId, target.mode)) return;
+    if (target.mode !== base) await this.setModeOf(client, sessionId, base);
+  }
+
+  /**
+   * One session into one mode: true once the agent took it. What it says it went into, where it
+   * says, is what it runs in: Claude Code runs Auto as Accept edits on a model that can't use it.
+   */
+  private async setModeOf(client: AcpClient, sessionId: string, mode: string): Promise<boolean> {
+    this.modeSaid.delete(sessionId);
+    try {
+      await client.setMode(sessionId, mode);
+    } catch (error) {
+      this.log(`${this.options.kind.name} stays in its own mode, not ${mode}: ${messageOf(error)}`);
+      return false;
+    }
+    const now = this.modeSaid.get(sessionId) ?? mode;
+    this.modeSaid.delete(sessionId);
+    const options = this.sessionOptions.get(sessionId);
+    if (options !== undefined) this.sessionOptions.set(sessionId, withCurrent(options, now));
+    this.ran(now);
+    return true;
+  }
+
+  /** Every live session into its mode now: a person picked one in Chips, put it back, or its time is up. */
+  private async remode(): Promise<void> {
+    const client = this.process.client;
+    const picked = pickedMode(this.options.chips);
+    this.log(`${this.options.kind.name}'s mode from Chips: ${picked ?? `back to ${this.options.kind.mode ?? "its own"}`}`);
+    if (client !== undefined && !client.gone) {
+      for (const sessionId of [...this.process.live]) await this.moded(client, sessionId);
+    }
+    this.modeNow = undefined;
+    for (const sessionId of this.process.live) {
+      const now = currentIn(this.sessionOptions.get(sessionId));
+      if (now !== undefined) this.ran(now);
+    }
+    this.ownRulesSoon();
+  }
+
+  /** The mode its sessions run in, where it is one a person may pick; Plan and the like are passing. */
+  private ran(mode: string): void {
+    if (!modesOf(this.options.kind).some((each) => each.id === mode) && mode !== this.options.kind.mode) return;
+    if (this.modeNow === mode) return;
+    this.modeNow = mode;
+    this.ownRulesSoon();
+  }
+
+  /** What it runs on its own, sent again in a moment. */
+  private ownRulesSoon(): void {
+    clearTimeout(this.ownRulesTimer);
+    this.ownRulesTimer = setTimeout(() => {
+      this.ownRulesTimer = undefined;
+      void this.sendOwnRules();
+    }, QUIET_MS);
+    this.ownRulesTimer.unref();
+  }
+
+  /** The mode its sessions run in, or go into next where none has said. */
+  private runningMode(): string | undefined {
+    const base = this.options.kind.mode;
+    if (base === undefined) return undefined;
+    if (this.modeNow !== undefined) return this.modeNow;
+    return modeTarget(base, modesOf(this.options.kind), pickedMode(this.options.chips), this.offered).mode;
   }
 
   /** The message's files, saved where the agent works, as lines that say where. */
@@ -1640,7 +1723,16 @@ export class Bridge {
   }
 
   private ownRules(): OwnRules | undefined {
-    if (this.knownKind === "codex") return codexOwnRules(this.options.kind.mode ?? "workspace-write");
+    const copy = this.ownRulesNow();
+    const base = this.options.kind.mode;
+    if (copy === undefined || base === undefined) return copy;
+    // The modes a person may pick in Chips, and the one it runs in (Chips ADR 0300).
+    const modes = modesCopy(modesOf(this.options.kind), base, this.runningMode(), this.offered);
+    return modes === undefined ? copy : { ...copy, modes };
+  }
+
+  private ownRulesNow(): OwnRules | undefined {
+    if (this.knownKind === "codex") return codexOwnRules(this.runningMode() ?? "workspace-write");
     if (this.knownKind !== "claude-code") return undefined;
     const userPath = join(this.places.claudeHome, "settings.json");
     const folders = [...new Set(this.records().map((record) => record.folder))].flatMap((folder): PlacedLayer[] =>
@@ -1653,7 +1745,7 @@ export class Bridge {
       userPath,
       user: readLayer(userPath),
       folders,
-      mode: this.options.kind.mode ?? "default",
+      mode: this.runningMode() ?? "default",
       home: this.places.home,
     });
   }
@@ -1801,7 +1893,24 @@ export class Bridge {
       case "config_option_update": {
         // The agent moved a session itself: Claude Code, off a model that refused a turn.
         const options = configOptionsOf(update);
-        if (this.sessionOptions.has(sessionId) && options.length > 0) this.sessionOptions.set(sessionId, options);
+        if (this.sessionOptions.has(sessionId) && options.length > 0) {
+          this.sessionOptions.set(sessionId, options);
+          const now = currentIn(options);
+          if (now !== undefined) {
+            this.modeSaid.set(sessionId, now);
+            this.ran(now);
+          }
+        }
+        return;
+      }
+      case "current_mode_update": {
+        // The mode it runs in, as the agent says it (Chips ADR 0300): Accept edits for Auto, say.
+        const mode = update["currentModeId"];
+        if (typeof mode !== "string" || mode === "") return;
+        const options = this.sessionOptions.get(sessionId);
+        if (options !== undefined) this.sessionOptions.set(sessionId, withCurrent(options, mode));
+        this.modeSaid.set(sessionId, mode);
+        this.ran(mode);
         return;
       }
       case "available_commands_update": {
@@ -2081,6 +2190,12 @@ export class Bridge {
     try {
       const made = await client.newSession(kind.folder ?? kind.folders);
       sessionId = made.sessionId;
+      // The modes it offers (Chips ADR 0300), for what Chips may pick before a room's session opens.
+      const offered = offeredIn(made.configOptions);
+      if (offered !== undefined && offered.join() !== this.offered?.join()) {
+        this.offered = offered;
+        this.ownRulesSoon();
+      }
       const { catalog, refused } = await lookAt(made.configOptions, (configId, value) =>
         client.setConfigOption(made.sessionId, configId, value),
       );

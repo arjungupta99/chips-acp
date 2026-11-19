@@ -81,6 +81,18 @@ export const PLAN_OPTIONS_BARE = [
   { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
 ] as const;
 
+/**
+ * The modes a fake offers, as its `mode` option, the adapters' way: the one each session starts in,
+ * those it refuses, and those it runs as another (Claude Code's Auto as Accept edits on a model that
+ * can't use it, which it says with a `current_mode_update`).
+ */
+export interface FakeModes {
+  readonly offered: readonly string[];
+  readonly start: string;
+  readonly refuses?: readonly string[];
+  readonly runsAs?: Readonly<Record<string, string>>;
+}
+
 export interface FakeAgent {
   readonly wire: () => Wire;
   readonly prompts: string[];
@@ -120,6 +132,7 @@ export function fakeAgent(
     model?: string;
     commands?: readonly string[];
     models?: FakeModels;
+    modes?: FakeModes;
     opening?: Promise<unknown>;
   } = {},
 ): FakeAgent {
@@ -160,9 +173,28 @@ export function fakeAgent(
       const models = options.models;
       const effortId = models?.effortId ?? "effort";
       const choiceOf = (model: string) => models?.choices.find((choice) => choice.id === model);
-      /** A session's options, as an answer carries them: none without `models`. */
+      /** What each session runs in, where it offers modes. */
+      const inMode = new Map<string, string>();
+      const modes = options.modes;
+      /** A session's mode option, where it offers modes. */
+      const modeOption = (sessionId: string): Message[] => {
+        if (modes === undefined) return [];
+        const now = inMode.get(sessionId) ?? modes.start;
+        inMode.set(sessionId, now);
+        return [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: now,
+            options: modes.offered.map((value) => ({ value, name: value })),
+          },
+        ];
+      };
+      /** A session's options, as an answer carries them: none without `models` or `modes`. */
       const configOptions = (sessionId: string): Message => {
-        if (models === undefined) return {};
+        if (models === undefined) return modes === undefined ? {} : { configOptions: modeOption(sessionId) };
         const now = on.get(sessionId) ?? { model: models.current, effort: models.effort };
         on.set(sessionId, now);
         const listed = models.choices.map((choice) => ({ value: choice.id, name: choice.name }));
@@ -171,6 +203,7 @@ export function fakeAgent(
         const levels = choiceOf(now.model)?.efforts ?? [];
         return {
           configOptions: [
+            ...modeOption(sessionId),
             { id: "model", name: "Model", category: "model", type: "select", currentValue: now.model, options: listed },
             ...(levels.length === 0
               ? []
@@ -580,10 +613,23 @@ export function fakeAgent(
           case "session/set_config_option":
             setOption(id, String(params["sessionId"]), String(params["configId"]), String(params["value"]));
             return;
-          case "session/set_mode":
-            agent.modes.push(`${String(params["sessionId"])}:${String(params["modeId"])}`);
+          case "session/set_mode": {
+            const sessionId = String(params["sessionId"]);
+            const modeId = String(params["modeId"]);
+            agent.modes.push(`${sessionId}:${modeId}`);
+            if (modes !== undefined && (!modes.offered.includes(modeId) || modes.refuses?.includes(modeId) === true)) {
+              send({ id, error: { code: -32603, message: `Mode ${modeId} is not available in this session` } });
+              return;
+            }
+            if (modes !== undefined) {
+              const runs = modes.runsAs?.[modeId] ?? modeId;
+              inMode.set(sessionId, runs);
+              if (runs !== modeId) update(sessionId, { sessionUpdate: "current_mode_update", currentModeId: runs });
+              update(sessionId, { sessionUpdate: "config_option_update", ...configOptions(sessionId) });
+            }
             send({ id, result: {} });
             return;
+          }
           case "session/cancel":
             agent.cancels.push(String(params["sessionId"]));
             cancelled.add(String(params["sessionId"]));

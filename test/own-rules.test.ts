@@ -115,13 +115,17 @@ describe("Claude Code's copy", () => {
 });
 
 describe("Codex's copy", () => {
-  it("says what its mode lets through", () => {
+  it("says what its mode lets through, each mode named as codex-acp names it", () => {
     const write = codexOwnRules("workspace-write");
-    assert.equal(write.mode, "Workspace write");
+    assert.equal(write.mode, "Workspace access");
     assert.deepEqual(write.runs, []);
     assert.match(write.note ?? "", /asks before the network/);
+    assert.equal(codexOwnRules("agent-full-access").everything, true);
+    assert.equal(codexOwnRules("agent-full-access").mode, "Full access");
     assert.equal(codexOwnRules("full-access").everything, true);
-    assert.equal(codexOwnRules("read-only").mode, "Read only");
+    assert.equal(codexOwnRules("read-only").mode, "Read-only");
+    assert.equal(codexOwnRules("agent").mode, "Auto review");
+    assert.match(codexOwnRules("agent").note ?? "", /asks only about one it finds risky/);
   });
 });
 

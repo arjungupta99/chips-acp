@@ -57,16 +57,24 @@ async function rig(
     folder?: string;
     projects?: boolean;
     gatherMs?: number;
+    /** The kind's command: a kind the bridge knows by name, say. */
+    command?: string[];
+    /** Each copy of what it runs on its own the bridge sends, kept here. */
+    ownRules?: unknown[];
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" }));
   if (options.chips === undefined) open.push(() => chips.close());
   const client = await connect({ url: chips.address.url, token: chips.address.token });
+  const copies = options.ownRules;
+  if (copies !== undefined) {
+    (client.settings as { ownRules: (copy: unknown) => Promise<unknown> }).ownRules = async (copy) => copies.push(copy);
+  }
   const agent = options.agent ?? fakeAgent();
   const state = options.state ?? { sessions: {}, agents: {} };
   const kind: KindConfig = {
     name: "Fakey",
-    command: ["fake"],
+    command: options.command ?? ["fake"],
     folders: options.folders ?? mkdtempSync(join(tmpdir(), "chips-acp-")),
     ...(options.folder === undefined ? {} : { folder: options.folder }),
     ...(options.mode === undefined ? {} : { mode: options.mode }),
@@ -344,6 +352,83 @@ describe("a turn", () => {
       assert.match(String(failed.payload["error"]), words);
       assert.equal(failed.payload["retryable"], true);
     }
+  });
+});
+
+describe("the mode a person picks in Chips (Chips ADR 0300, 19 November addendum)", () => {
+  const CODEX = ["read-only", "workspace-write", "agent", "agent-full-access"];
+  /** A person's pick, as the app sends it, or `null` to put it back. */
+  const pick = (chips: FakeChips, mode: Record<string, unknown> | null) =>
+    chips.asOwner({
+      type: "policy.updated",
+      harness_id: chips.address.harnessId,
+      policy: { autonomy: 1, rules: [], mode },
+    });
+  const lastModes = (copies: unknown[]) =>
+    (copies.at(-1) as { modes?: { running?: string; offers: { id: string }[] }; mode?: string; everything?: boolean } | undefined);
+
+  it("puts each live session in the mode picked, says it runs in it, and puts them back", async () => {
+    const copies: unknown[] = [];
+    const agent = fakeAgent({ modes: { offered: CODEX, start: "agent" } });
+    const { chips } = await rig({ agent, command: ["codex-acp"], mode: "workspace-write", ownRules: copies });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    const session = agent.made[0];
+    assert.deepEqual(agent.modes, [`${session}:workspace-write`]);
+    assert.deepEqual(lastModes(copies)?.modes?.offers.map((mode) => mode.id), CODEX);
+
+    await pick(chips, { id: "agent-full-access", name: "Full access", everything: true });
+    await until(() => agent.modes.includes(`${session}:agent-full-access`));
+    await until(() => lastModes(copies)?.modes?.running === "agent-full-access");
+    assert.equal(lastModes(copies)?.mode, "Full access");
+    assert.equal(lastModes(copies)?.everything, true);
+
+    await pick(chips, null);
+    await until(() => agent.modes.at(-1) === `${session}:workspace-write`);
+    await until(() => lastModes(copies)?.modes?.running === "workspace-write");
+    assert.equal(lastModes(copies)?.everything, undefined);
+  });
+
+  it("starts a new session in the pick, and goes back to the one it starts in when its time is up", async () => {
+    const agent = fakeAgent({ modes: { offered: CODEX, start: "agent" } });
+    const { chips } = await rig({ agent, command: ["codex-acp"], mode: "workspace-write" });
+    await pick(chips, { id: "agent", until: new Date(Date.now() + 800).toISOString() });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    const session = agent.made[0];
+    assert.deepEqual(agent.modes, [`${session}:agent`]);
+    await until(() => agent.modes.at(-1) === `${session}:workspace-write`, 4000);
+  });
+
+  it("stays in the mode it starts in for a pick the agent doesn't offer or refuses, and says what it runs in", async () => {
+    const copies: unknown[] = [];
+    const agent = fakeAgent({
+      modes: { offered: ["read-only", "workspace-write", "agent"], start: "agent", runsAs: { agent: "read-only" } },
+    });
+    const { chips, logs } = await rig({ agent, command: ["codex-acp"], mode: "workspace-write", ownRules: copies });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    const session = agent.made[0];
+    // Full access isn't offered here: it isn't asked for, and the log says why.
+    await pick(chips, { id: "agent-full-access" });
+    await until(() => logs.some((line) => line.includes("doesn't offer agent-full-access")));
+    assert.ok(!agent.modes.includes(`${session}:agent-full-access`));
+    await until(() => lastModes(copies)?.modes?.offers.length === 3);
+    assert.deepEqual(lastModes(copies)?.modes?.offers.map((mode) => mode.id), ["read-only", "workspace-write", "agent"]);
+    // Asked for Auto review, it runs as Read-only, and says so.
+    await pick(chips, { id: "agent" });
+    await until(() => agent.modes.at(-1) === `${session}:agent`);
+    await until(() => lastModes(copies)?.modes?.running === "read-only");
+  });
+
+  it("puts a kind it doesn't know in the mode its config names, whatever is picked", async () => {
+    const agent = fakeAgent({ modes: { offered: ["default", "auto"], start: "auto" } });
+    const { chips } = await rig({ agent, mode: "default" });
+    await pick(chips, { id: "auto" });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    assert.deepEqual(agent.modes, [`${agent.made[0]}:default`]);
   });
 });
 

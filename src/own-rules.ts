@@ -12,6 +12,7 @@
 
 import { homedir } from "node:os";
 import type { Layer } from "./claude-settings.js";
+import type { OwnModes } from "./modes.js";
 
 /** One thing the settings let through, ask about, or refuse, as Chips's `ownEntry` has it. */
 export interface OwnEntry {
@@ -27,6 +28,8 @@ export interface OwnRules {
   readonly note?: string | undefined;
   readonly mode?: string | undefined;
   readonly everything?: boolean | undefined;
+  /** The modes a person may pick in Chips (Chips ADR 0300), as `modes.ts` writes them. */
+  readonly modes?: OwnModes | undefined;
   readonly runs: OwnEntry[];
   readonly asks?: OwnEntry[] | undefined;
   readonly refuses?: OwnEntry[] | undefined;
@@ -174,10 +177,12 @@ export function claudeOwnRules(options: {
   };
 }
 
+/** Codex's modes as codex-acp names them, and the names of its sandboxes before it. */
 const CODEX_MODES: Readonly<Record<string, string>> = {
-  "read-only": "Read only",
-  "workspace-write": "Workspace write",
-  auto: "Auto",
+  "read-only": "Read-only",
+  "workspace-write": "Workspace access",
+  agent: "Auto review",
+  "agent-full-access": "Full access",
   "full-access": "Full access",
   "danger-full-access": "Full access",
 };
@@ -186,7 +191,7 @@ const CODEX_MODES: Readonly<Record<string, string>> = {
 export function codexOwnRules(mode: string): OwnRules {
   const read_from = ["the mode Chips starts each Codex session in"];
   const name = CODEX_MODES[mode] ?? mode;
-  if (mode === "full-access" || mode === "danger-full-access") {
+  if (mode === "agent-full-access" || mode === "full-access" || mode === "danger-full-access") {
     return {
       read_from,
       mode: name,
@@ -200,6 +205,14 @@ export function codexOwnRules(mode: string): OwnRules {
       read_from,
       mode: name,
       note: "Codex reads on its own and asks before it changes a file or runs anything else.",
+      runs: [],
+    };
+  }
+  if (mode === "agent") {
+    return {
+      read_from,
+      mode: name,
+      note: "Codex edits files and runs commands inside the agent's folder in its own sandbox, judges each step itself, and asks only about one it finds risky.",
       runs: [],
     };
   }
