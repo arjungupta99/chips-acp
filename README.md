@@ -131,6 +131,13 @@ its asks). Then nothing reaches Chips as a card. Put them where they ask:
   Permissions page: Claude Code's `permissions` lists from your settings and each agent's folder,
   and the mode; for Codex, its mode. It reads them and never writes them. Needs Chips SDK 1.0.10;
   on an older one nothing is sent.
+- A person can pick another mode for a while on the harness's settings page in Chips (Chips ADR
+  0300): Claude Code's Default, Accept edits, Auto or Bypass permissions; Codex's Read-only,
+  Workspace access, Auto review or Full access, those the adapter offers. Each session goes into
+  the pick, the open ones at once, and back into the mode above when its time is up. A pick the
+  adapter doesn't offer leaves it in the mode above. This is for the kinds as known here, started
+  in the mode above; a config with another `mode` or `command` gets no picker. Needs Chips SDK
+  1.0.11; on an older one the sessions stay in the mode above.
 
 ## Live
 
