@@ -19,6 +19,7 @@ import {
   type KindConfig,
   lookAgainGoal,
   lookAgainPrompt,
+  optionFor,
   questionFor,
   titleFrom,
 } from "../src/bridge.ts";
@@ -893,6 +894,23 @@ describe("what it asks", () => {
     await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
     const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
     assert.equal(words.payload["text"], "Given: always");
+  });
+
+  it("gives a command's Always to the agent as its own always when the harness keeps it (Chips ADR 0300)", () => {
+    const options = [
+      { optionId: "once", kind: "allow_once" },
+      { optionId: "always", kind: "allow_always" },
+      { optionId: "no", kind: "reject_once" },
+    ];
+    const always = { allowed: true, scope: "always" } as Parameters<typeof optionFor>[0];
+    const kept = { ...always, keeps: "harness" } as Parameters<typeof optionFor>[0];
+    // Chips's rules on: Chips keeps a command's Always, so the agent is told once.
+    assert.equal(optionFor(always, options, true), "once");
+    // Off: the harness keeps it, in its own settings.
+    assert.equal(optionFor(kept, options, true), "always");
+    assert.equal(optionFor(kept, options, false), "always");
+    assert.equal(optionFor({ ...kept, scope: "once" } as Parameters<typeof optionFor>[0], options, true), "once");
+    assert.equal(optionFor({ ...kept, allowed: false } as Parameters<typeof optionFor>[0], options, true), "no");
   });
 
   it("gives it its reject when a person says no", async () => {

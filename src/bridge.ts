@@ -2420,17 +2420,22 @@ function riskOf(kind: string): RiskClass[] {
 
 /**
  * The agent's option for a decision: always where it was allowed always and it has one. A
- * command's Always is the agent's once (Chips ADR 0239): Chips remembers it by how each part
- * starts and answers the next ask itself, where the agent's own always would let through more.
+ * command's Always is the agent's once while Chips keeps it (Chips ADR 0239): Chips remembers it
+ * by how each part starts and answers the next ask itself, where the agent's own always would let
+ * through more. With the harness's Chips's rules off, Chips keeps nothing and says the harness
+ * keeps it (`keeps: "harness"`, Chips ADR 0300), so a command's Always is the agent's own always.
  */
-function optionFor(
+export function optionFor(
   decision: Decision,
   options: readonly { optionId: string; kind: string }[],
   command: boolean,
 ): string | undefined {
   const find = (kind: string) => options.find((option) => option.kind === kind)?.optionId;
   if (!decision.allowed) return find("reject_once") ?? find("reject_always");
-  if (decision.scope === "always" && !command) return find("allow_always") ?? find("allow_once");
+  const harnessKeeps = (decision as { readonly keeps?: string }).keeps === "harness";
+  if (decision.scope === "always" && (!command || harnessKeeps)) {
+    return find("allow_always") ?? find("allow_once");
+  }
   return find("allow_once") ?? find("allow_always");
 }
 
