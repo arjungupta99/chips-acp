@@ -39,10 +39,13 @@ need not be there: without them the bridge runs Claude Code or Codex, in the mod
 
 Before it takes the link up, which works once, it checks:
 - the config is there, or is one of those two;
-- its command is on this machine's PATH (else how to install it);
+- its command is on this machine's PATH (else how to install it). Claude Code and Codex are also
+  looked for in `~/.local/bin`, where their makers' installers put them, since the terminal an
+  installer ran in doesn't have that folder on its PATH until a new one is opened;
 - the agent starts, makes a session, and is signed in: Codex refuses a session while signed out,
   and Claude Code says it is signed in as nobody (`_auth/status_update`). Signed out, it says how
-  to sign in: `codex login`, or `claude` then /login.
+  to sign in: `codex login` (`codex login --device-auth` on a machine with no screen), or
+  `claude auth login`.
 
 Anything missing stops it with what to do, and the link is still good. Joined, it says hello in its
 room once, which the card waits for; a new link from Chips replaces the key it kept. Without a

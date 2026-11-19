@@ -17,6 +17,9 @@ import { adapterFailedStop, agentMissingStop, knownConfig, knownOf } from "./kin
 import { placesOf } from "./places.js";
 import { onPath, runnable, SetupError, STILL_GOOD } from "./setup.js";
 
+/** For an agent installed somewhere the bridge doesn't look: a new terminal knows where. */
+export const inNewTerminal = (name: string) => `If ${name} still isn't found, run that command in a new terminal.`;
+
 /** How long an adapter's download has: they are hundreds of megabytes, on any connection. */
 const PATIENCE_MS = 20 * 60_000;
 
@@ -26,6 +29,22 @@ export const adapterFolder = (id: string, home: string = homedir()): string => j
 const fetchedAt = (id: string, program: string, home: string) => join(adapterFolder(id, home), "node_modules", ".bin", program);
 
 const pathOf = (kind: KindConfig, env: NodeJS.ProcessEnv) => ({ ...env, ...kind.env })["PATH"] ?? "";
+
+/**
+ * The folder a known kind's agent is in when it isn't on the PATH: where its maker's installer puts
+ * it. The terminal that ran the installer doesn't know that folder until a new one is opened, so
+ * the same command run again there would say the agent is still missing.
+ */
+export function makersFolder(kind: KindConfig, env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string | undefined {
+  const known = knownOf(kind);
+  if (known === undefined || onPath(known.agent, pathOf(kind, env))) return undefined;
+  const folder = join(home, known.installedIn);
+  return runnable(join(folder, known.agent)) ? folder : undefined;
+}
+
+/** A PATH with `folder` last on it: whatever the PATH already finds is still found first. */
+export const pathWithLast = (path: string | undefined, folder: string): string =>
+  [...(path ?? "").split(delimiter).filter((each) => each !== ""), folder].join(delimiter);
 
 /** The kind as it should run: on the adapter fetched for it, when its own isn't on the PATH. */
 export function withFetchedAdapter(kind: KindConfig, env: NodeJS.ProcessEnv = process.env, home: string = homedir()): KindConfig {
@@ -108,7 +127,10 @@ export async function readyAdapter(kind: KindConfig, options: ReadyOptions = {})
   const path = pathOf(kind, env);
   if (onPath(known.program, path)) return kind;
   if (!onPath(known.agent, path)) {
-    throw new SetupError(`${kind.name} isn't installed on this machine: run \`${known.installLine}\`. ${STILL_GOOD}`, agentMissingStop(known));
+    throw new SetupError(
+      `${kind.name} isn't installed on this machine: run \`${known.installLine}\`. ${STILL_GOOD} ${inNewTerminal(kind.name)}`,
+      agentMissingStop(known),
+    );
   }
   const npm = env["CHIPS_NPM"];
   if (!known.fetches || npm === undefined || npm === "") return kind;

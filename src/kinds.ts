@@ -26,9 +26,15 @@ interface Known {
   /** The agent's own command, which a person installs from its maker, and the maker's line for it. */
   readonly agent: string;
   readonly installLine: string;
+  /**
+   * Where that line puts the agent, under the home folder. The terminal it was run in doesn't know
+   * the folder until a new one is opened, so the bridge looks there too (`makersFolder`).
+   */
+  readonly installedIn: string;
   readonly mode: string;
-  /** What a person does to sign it in, in a terminal. */
+  /** What a person does to sign it in, in a terminal, and on a machine with no screen where that differs. */
   readonly signIn: string;
+  readonly signInNoScreen?: string;
   /** The same for Chips for Mac's sheet: the line to copy, and what to do with it. */
   readonly signInLine: string;
   readonly signInDoing: string;
@@ -46,6 +52,7 @@ const KNOWN: readonly Known[] = [
     fetches: false,
     agent: "claude",
     installLine: "curl -fsSL https://claude.ai/install.sh | bash",
+    installedIn: ".local/bin",
     mode: "default",
     signIn: "run `claude auth login`",
     signInLine: "claude auth login",
@@ -60,8 +67,11 @@ const KNOWN: readonly Known[] = [
     fetches: true,
     agent: "codex",
     installLine: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    installedIn: ".local/bin",
     mode: "workspace-write",
     signIn: "run `codex login`",
+    // Over SSH no browser opens, and the address `codex login` prints calls back to that machine.
+    signInNoScreen: "`codex login --device-auth`",
     signInLine: "codex login",
     signInDoing: SIGN_IN_DOING,
   },
@@ -139,7 +149,11 @@ export function installWords(kind: KindConfig): string {
 /** What to tell a person whose agent refused because it isn't signed in. */
 export function signedOutWords(kind: KindConfig, info?: AgentInfo): string {
   const known = knownBy(kind);
-  if (known !== undefined) return `${kind.name} isn't signed in on this machine: ${known.signIn} in a terminal.`;
+  // A new terminal, since one the agent was just installed in doesn't know its command yet.
+  if (known !== undefined) {
+    const noScreen = known.signInNoScreen === undefined ? "" : `, or ${known.signInNoScreen} on a machine with no screen`;
+    return `${kind.name} isn't signed in on this machine: ${known.signIn} in a new terminal${noScreen}.`;
+  }
   const ways = (info?.authMethods ?? []).map((method) => method.name);
   return `${kind.name} isn't signed in on this machine: sign it in its own way${ways.length > 0 ? ` (${ways.join(", ")})` : ""}.`;
 }

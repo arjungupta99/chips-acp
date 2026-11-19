@@ -87,14 +87,16 @@ describe("the agent started and signed in, before the link is taken up", () => {
   it("stops when it says it is signed in as nobody, as Claude Code does, with how to sign in", async () => {
     await assert.rejects(
       checkSignIn(kind, fakeAgent({ auth: "out" }).wire(), folder),
-      stopsWith(/^Claude Code isn't signed in on this machine: run `claude auth login` in a terminal\./),
+      stopsWith(/^Claude Code isn't signed in on this machine: run `claude auth login` in a new terminal\./),
     );
   });
 
   it("stops when it refuses a session for it, as Codex does", async () => {
     await assert.rejects(
       checkSignIn(codex, fakeAgent({ auth: "out", refusesSessions: true }).wire(), folder),
-      stopsWith(/^Codex isn't signed in on this machine: run `codex login` in a terminal\./),
+      stopsWith(
+        /^Codex isn't signed in on this machine: run `codex login` in a new terminal, or `codex login --device-auth` on a machine with no screen\./,
+      ),
     );
   });
 

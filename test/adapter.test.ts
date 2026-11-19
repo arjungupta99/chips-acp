@@ -8,7 +8,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { adapterFolder, forgetAdapter, type Install, readyAdapter, withFetchedAdapter } from "../src/adapter.ts";
+import {
+  adapterFolder,
+  forgetAdapter,
+  type Install,
+  makersFolder,
+  pathWithLast,
+  readyAdapter,
+  withFetchedAdapter,
+} from "../src/adapter.ts";
 import type { KindConfig } from "../src/bridge.ts";
 import { knownConfig } from "../src/kinds.ts";
 import { checkCommand, SetupError } from "../src/setup.ts";
@@ -57,6 +65,10 @@ describe("the adapter, when Connect needs it", () => {
       const fake = fakeInstall("nothing");
       await assert.rejects(readyAdapter(kindOf(id), { home, env: { PATH: bin, CHIPS_NPM: npm }, install: fake.install }), (error: unknown) => {
         assert.ok(error instanceof SetupError);
+        assert.equal(
+          error.message,
+          `${name} isn't installed on this machine: run \`${line}\`. The link is still good: run the same command again once that's done. If ${name} still isn't found, run that command in a new terminal.`,
+        );
         assert.deepEqual(error.words, {
           detail: `${name} isn't on this Mac`,
           says: `${name} isn't installed on this Mac.`,
@@ -67,6 +79,47 @@ describe("the adapter, when Connect needs it", () => {
       });
       assert.equal(fake.jobs.length, 0);
     }
+  });
+
+  it("finds an agent its maker's installer has just put in ~/.local/bin, which this terminal's PATH doesn't have yet", async () => {
+    for (const [id, agent] of [
+      ["codex", "codex"],
+      ["claude-code", "claude"],
+    ] as const) {
+      const { home, bin } = machine();
+      // Nowhere: nothing to add.
+      assert.equal(makersFolder(kindOf(id), { PATH: bin }, home), undefined);
+      const makers = join(home, ".local", "bin");
+      mkdirSync(makers, { recursive: true });
+      // There, but not something to run: still nowhere.
+      writeFileSync(join(makers, agent), "#!/bin/sh\n");
+      assert.equal(makersFolder(kindOf(id), { PATH: bin }, home), undefined);
+      chmodSync(join(makers, agent), 0o755);
+      assert.equal(makersFolder(kindOf(id), { PATH: bin }, home), makers);
+      // With the folder last on the PATH, the agent is found and the stop for it is gone.
+      const env = { PATH: pathWithLast(bin, makers), CHIPS_NPM: npm };
+      const fake = fakeInstall(id === "codex" ? "codex-acp" : "nothing");
+      const ready = await readyAdapter(kindOf(id), { home, env, install: fake.install });
+      assert.equal(fake.jobs.length, id === "codex" ? 1 : 0);
+      if (id === "codex") assert.equal(ready.command[0], join(adapterFolder("codex", home), "node_modules", ".bin", "codex-acp"));
+      // Claude Code's adapter isn't fetched, so what is said next is the adapter, not the agent.
+      else assert.throws(() => checkCommand(ready, env), /Claude Code's command, claude-agent-acp, isn't on this machine's PATH/);
+    }
+  });
+
+  it("adds nothing for an agent the PATH already finds, or a kind that names its own command", () => {
+    const { home, bin } = machine("codex");
+    const makers = join(home, ".local", "bin");
+    mkdirSync(makers, { recursive: true });
+    writeFileSync(join(makers, "codex"), "#!/bin/sh\n");
+    chmodSync(join(makers, "codex"), 0o755);
+    assert.equal(makersFolder(kindOf("codex"), { PATH: bin }, home), undefined);
+    const own: KindConfig = { name: "Mine", command: ["my-agent"], folders: join(root, "rooms") };
+    assert.equal(makersFolder(own, { PATH: bin }, home), undefined);
+    // Last, so whatever the PATH already finds is still found first; no empty entry, which a shell reads as "here".
+    assert.equal(pathWithLast("/a:/b", "/c"), "/a:/b:/c");
+    assert.equal(pathWithLast("", "/c"), "/c");
+    assert.equal(pathWithLast(undefined, "/c"), "/c");
   });
 
   it("uses an adapter already on the PATH, agent or no agent, and fetches nothing", async () => {

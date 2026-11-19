@@ -94,9 +94,21 @@ describe("ACP's card, from a link to its hello", { skip, timeout: 180_000 }, () 
     const bare = [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter);
     await stopped(
       card.command,
-      /Claude Code isn't installed on this machine: run `curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash`\./,
+      /Claude Code isn't installed on this machine: run `curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash`\. .* If Claude Code still isn't found, run that command in a new terminal\./,
       bare,
     );
+    // Claude Code where its maker's installer puts it, which the terminal it was installed in doesn't
+    // have on its PATH yet: found there, so what is asked for next is its adapter.
+    const makers = join(home, ".local", "bin");
+    mkdirSync(makers, { recursive: true });
+    writeFileSync(join(makers, "claude"), "#!/bin/sh\necho 'the stand-in claude is never run' >&2\nexit 1\n");
+    chmodSync(join(makers, "claude"), 0o755);
+    await stopped(
+      card.command,
+      /Claude Code's command, claude-agent-acp, isn't on this machine's PATH: install it with `npm install -g @agentclientprotocol\/claude-agent-acp`/,
+      bare,
+    );
+    rmSync(makers, { recursive: true, force: true });
     // Claude Code there and its adapter not: the bridge fetches none for Claude Code, and says how to.
     await stopped(
       card.command,

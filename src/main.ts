@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep, runsKept } from "@chipschat/harness";
 import { processWire } from "./acp.js";
-import { forgetAdapter, readyAdapter, withFetchedAdapter } from "./adapter.js";
+import { forgetAdapter, makersFolder, pathWithLast, readyAdapter, withFetchedAdapter } from "./adapter.js";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
 import { handsOver, keepIfAsked, stopIfAsked, stopping, words } from "./keep.js";
 import { adapterEnv, knownIdOf } from "./kinds.js";
@@ -59,7 +59,14 @@ const configPath = configPathOf(words[0]);
 // What it needs, checked before a link is taken up, which works once.
 let kind: KindConfig;
 try {
-  kind = withFetchedAdapter(readConfig(configPath));
+  kind = readConfig(configPath);
+  // An agent its maker's installer has just put in place, in a terminal that doesn't know its
+  // folder yet: the folder goes last on this run's PATH, which the agent's adapter runs with and
+  // the copy kept running takes with it. Only when it joins: a copy already kept runs on the PATH
+  // it was kept with, as it always has.
+  const makers = link === undefined ? undefined : makersFolder(kind);
+  if (makers !== undefined) process.env["PATH"] = pathWithLast(process.env["PATH"], makers);
+  kind = withFetchedAdapter(kind);
   mkdirSync(kind.folder ?? kind.folders, { recursive: true });
   if (link !== undefined) {
     reportStep("checking", { detail: `Looking for ${kind.name}` });
