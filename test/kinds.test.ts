@@ -13,7 +13,7 @@ import type { KindConfig } from "../src/bridge.ts";
 import { AcpError, agentWords } from "../src/acp.ts";
 import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords } from "../src/kinds.ts";
 import { lookAt } from "../src/models.ts";
-import { copilotOwnRules, grokModeOf, grokOwnRules, grokRulesOf, modeOwnRules } from "../src/own-rules.ts";
+import { copilotOwnRules, grokModeFrom, grokModeOf, grokOwnRules, grokRulesOf, modeOwnRules } from "../src/own-rules.ts";
 import { checkCommand, readConfig, SetupError } from "../src/setup.ts";
 
 const root = mkdtempSync(join(tmpdir(), "chips-acp-kinds-"));
@@ -293,6 +293,57 @@ describe("Copilot's and Grok's own permissions, on the Permissions page", () => 
     assert.equal(grokModeOf(undefined), "ask");
   });
 
+  it("takes Grok's mode from Claude Code's defaultMode first, the most specific file's, then from its own config", () => {
+    const config = { path: "/Users/ada/.grok/config.toml", toml: CONFIG };
+    const user = (defaultMode: string) => ({ path: "/Users/ada/.claude/settings.json", layer: { permissions: { defaultMode } } });
+    const local = (defaultMode: string) => ({ path: "/Users/ada/.claude/settings.local.json", layer: { permissions: { defaultMode } } });
+    // Grok 1.0.89 ran in Auto from Claude Code's settings while its own config said ask.
+    assert.deepEqual(grokModeFrom(config, [user("auto")]), { mode: "auto", from: "/Users/ada/.claude/settings.json" });
+    assert.deepEqual(grokModeFrom(config, [user("auto"), local("dontAsk")]), { mode: "dont-ask", from: "/Users/ada/.claude/settings.local.json" });
+    assert.equal(grokModeFrom(config, [user("acceptEdits")]).mode, "accept-edits");
+    assert.equal(grokModeFrom(config, [user("bypassPermissions")]).mode, "always-approve");
+    // Plan isn't a mode Grok's ACP sessions go into.
+    assert.equal(grokModeFrom(config, [user("plan")]).mode, "ask");
+    // A mode Grok doesn't know, or none, leaves it to Grok's own config.
+    assert.deepEqual(grokModeFrom(config, [user("sideways"), { path: "/x/.claude/settings.json", layer: {} }]), {
+      mode: "ask",
+      from: "/Users/ada/.grok/config.toml",
+    });
+    assert.deepEqual(grokModeFrom({ path: config.path, toml: '[ui]\npermission_mode = "auto"' }, []), { mode: "auto", from: config.path });
+    assert.deepEqual(grokModeFrom({ path: config.path, toml: undefined }, []), { mode: "ask" });
+  });
+
+  it("says when Grok's mode comes from Claude Code's settings, and lists that file", () => {
+    const home = "/Users/ada";
+    const copy = grokOwnRules({
+      configPath: `${home}/.grok/config.toml`,
+      config: '[ui]\npermission_mode = "ask"',
+      claude: [{ path: `${home}/.claude/settings.json`, layer: { permissions: { defaultMode: "auto" } } }],
+      home,
+    });
+    assert.deepEqual(copy.read_from, ["~/.grok/config.toml", "~/.claude/settings.json"]);
+    assert.equal(copy.mode, "Auto");
+    assert.equal(
+      copy.note,
+      "Grok's own check lets safe steps through, and blocks or asks about the rest. Grok takes this mode from defaultMode in ~/.claude/settings.json, ahead of its own config.",
+    );
+    // Accept edits lets every edit through.
+    const edits = grokOwnRules({
+      configPath: `${home}/.grok/config.toml`,
+      config: undefined,
+      claude: [{ path: `${home}/.claude/settings.json`, layer: { permissions: { defaultMode: "acceptEdits", allow: ["Bash(git:*)"] } } }],
+      home,
+    });
+    assert.equal(edits.mode, "Accept edits");
+    assert.deepEqual(
+      edits.runs.map((entry) => [entry.kind, entry.name, entry.raw]),
+      [
+        ["command", "Bash", "Bash(git:*)"],
+        ["write", "Edit", "acceptEdits"],
+      ],
+    );
+  });
+
   it("reads Grok's own rules, whatever order their keys are in", () => {
     const rules = grokRulesOf(CONFIG);
     assert.deepEqual(
@@ -316,7 +367,10 @@ describe("Copilot's and Grok's own permissions, on the Permissions page", () => 
     });
     assert.deepEqual(copy.read_from, ["~/.grok/config.toml", "~/.claude/settings.local.json"]);
     assert.equal(copy.mode, "Ask");
-    assert.equal(copy.note, "Grok asks before anything its rules don't allow. It follows your Claude Code permission rules too, as listed here.");
+    assert.equal(
+      copy.note,
+      "Grok asks before anything but read-only steps and what its rules allow. It follows your Claude Code permission rules too, as listed here.",
+    );
     // Grok's own first, then the Claude Code ones, each as written.
     assert.deepEqual(
       copy.runs.map((entry) => [entry.name, entry.raw]),

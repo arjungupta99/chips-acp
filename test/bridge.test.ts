@@ -61,6 +61,8 @@ async function rig(
     command?: string[];
     /** Each copy of what it runs on its own the bridge sends, kept here. */
     ownRules?: unknown[];
+    /** The home folder the bridge reads settings from: a new empty one, never the real one. */
+    home?: string;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" }));
@@ -89,6 +91,7 @@ async function rig(
     log: (line) => logs.push(line),
     respawnMs: 20,
     gatherMs: options.gatherMs ?? 10,
+    home: options.home ?? mkdtempSync(join(tmpdir(), "chips-acp-home-")),
     ...(options.projects === undefined ? {} : { projects: options.projects }),
     ...(options.idleMs === undefined ? {} : { idleMs: options.idleMs }),
   });

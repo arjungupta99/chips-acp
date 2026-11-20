@@ -269,19 +269,57 @@ const tomlString = (section: string, key: string): string | undefined =>
 
 const tomlTrue = (section: string, key: string): boolean => new RegExp(`^\\s*${key}\\s*=\\s*true\\b`, "m").test(section);
 
+/** The modes a Grok session can run in. */
+export type GrokMode = "ask" | "accept-edits" | "auto" | "dont-ask" | "always-approve";
+
 /** Grok's own mode, from `[ui]` in its config: `permission_mode`, else the older `approval_mode` and `yolo`. */
-export function grokModeOf(toml: string | undefined): "ask" | "auto" | "always-approve" {
+export function grokModeOf(toml: string | undefined): GrokMode {
   const ui = tomlSection(toml ?? "", "ui");
   const said = tomlString(ui, "permission_mode") ?? tomlString(ui, "approval_mode");
   if (said === "auto" || said === "always-approve" || said === "ask") return said;
   return tomlTrue(ui, "yolo") ? "always-approve" : "ask";
 }
 
-const GROK_MODES = {
-  ask: { name: "Ask", note: "Grok asks before anything its rules don't allow." },
-  auto: { name: "Auto", note: "Grok's own check lets safe steps through and asks about risky ones." },
+/**
+ * Claude Code's `defaultMode` as Grok takes it. Grok accepts `plan` there but doesn't go into plan
+ * mode for it, and its ACP sessions ignore plan anyway, so plan is Ask.
+ */
+const GROK_FROM_CLAUDE: Readonly<Record<string, GrokMode>> = {
+  default: "ask",
+  plan: "ask",
+  acceptEdits: "accept-edits",
+  auto: "auto",
+  dontAsk: "dont-ask",
+  bypassPermissions: "always-approve",
+};
+
+/**
+ * The mode Grok's sessions run in, and the file that says it. A Claude Code `defaultMode` comes
+ * first, the most specific file's (local over shared, an agent folder's over the person's): Grok
+ * 1.0.89 was seen running in Auto from `~/.claude/settings.json` while its own config said ask
+ * (20 November 2026). Then Grok's own `[ui]` setting, then Ask.
+ */
+export function grokModeFrom(
+  config: { readonly path: string; readonly toml: string | undefined },
+  claude: readonly PlacedLayer[],
+): { readonly mode: GrokMode; readonly from?: string } {
+  for (const each of [...claude].reverse()) {
+    const said = ownDefaultMode(each.layer);
+    const mode = said === undefined ? undefined : GROK_FROM_CLAUDE[said];
+    if (mode !== undefined) return { mode, from: each.path };
+  }
+  const ui = tomlSection(config.toml ?? "", "ui");
+  const said = tomlString(ui, "permission_mode") ?? tomlString(ui, "approval_mode") ?? (tomlTrue(ui, "yolo") ? "yolo" : undefined);
+  return said === undefined ? { mode: "ask" } : { mode: grokModeOf(config.toml), from: config.path };
+}
+
+const GROK_MODES: Readonly<Record<GrokMode, { readonly name: string; readonly note: string }>> = {
+  ask: { name: "Ask", note: "Grok asks before anything but read-only steps and what its rules allow." },
+  "accept-edits": { name: "Accept edits", note: "Grok edits files without asking, and asks before commands its rules don't allow." },
+  auto: { name: "Auto", note: "Grok's own check lets safe steps through, and blocks or asks about the rest." },
+  "dont-ask": { name: "Don't ask", note: "Grok runs only read-only steps and what its rules allow, and refuses the rest without asking." },
   "always-approve": { name: "Always-approve", note: "Grok approves every step without asking: only deny rules and hooks stop one." },
-} as const;
+};
 
 /** One of Grok's own rules, `{ action = "allow", tool = "bash", pattern = "git *" }`, as an entry. */
 function grokEntry(tool: string, pattern: string | undefined, raw: string): OwnEntry {
@@ -312,8 +350,9 @@ export function grokRulesOf(toml: string | undefined): Record<"allow" | "ask" | 
 }
 
 /**
- * Grok's copy (Chips ADR 0301): its mode and rules from `~/.grok/config.toml`, and the permission
- * rules it takes from Claude Code's settings files, which it follows too. Read, never written.
+ * Grok's copy (Chips ADR 0301): its mode, from Claude Code's `defaultMode` or its own config, its
+ * rules from `~/.grok/config.toml`, and the permission rules it takes from Claude Code's settings
+ * files, which it follows too. Read, never written.
  */
 export function grokOwnRules(options: {
   readonly configPath: string;
@@ -322,21 +361,33 @@ export function grokOwnRules(options: {
   readonly home?: string | undefined;
 }): OwnRules {
   const home = options.home ?? homedir();
-  const mode = grokModeOf(options.config);
+  const { mode, from } = grokModeFrom({ path: options.configPath, toml: options.config }, options.claude);
   const own = grokRulesOf(options.config);
   const layers = options.claude.map((each) => each.layer);
   const borrowed = { allow: joined(layers, "allow"), ask: joined(layers, "ask"), deny: joined(layers, "deny") };
   const withClaude = borrowed.allow.length + borrowed.ask.length + borrowed.deny.length > 0;
-  const read_from = [tilde(options.configPath, home), ...(withClaude ? options.claude.map((each) => tilde(each.path, home)) : [])].slice(0, MOST_PLACES);
-  const note = [GROK_MODES[mode].note, withClaude ? "It follows your Claude Code permission rules too, as listed here." : undefined]
+  const fromClaude = from !== undefined && from !== options.configPath;
+  const read_from = [
+    tilde(options.configPath, home),
+    ...options.claude.filter((each) => withClaude || each.path === from).map((each) => tilde(each.path, home)),
+  ].slice(0, MOST_PLACES);
+  const note = [
+    GROK_MODES[mode].note,
+    fromClaude ? `Grok takes this mode from defaultMode in ${tilde(from, home)}, ahead of its own config.` : undefined,
+    withClaude ? "It follows your Claude Code permission rules too, as listed here." : undefined,
+  ]
     .filter((line): line is string => line !== undefined)
     .join(" ");
   if (mode === "always-approve") return { read_from, mode: GROK_MODES[mode].name, everything: true, note, runs: [] };
+  const allowed = [...own.allow, ...borrowed.allow];
+  // Accept edits lets every edit through, whatever the rules say.
+  const edits: OwnEntry[] =
+    mode === "accept-edits" && !allowed.some((entry) => entry.kind === "write") ? [{ kind: "write", name: "Edit", raw: "acceptEdits" }] : [];
   return {
     read_from,
     mode: GROK_MODES[mode].name,
     note,
-    runs: [...own.allow, ...borrowed.allow].slice(0, MOST),
+    runs: [...allowed, ...edits].slice(0, MOST),
     asks: [...own.ask, ...borrowed.ask].slice(0, MOST),
     refuses: [...own.deny, ...borrowed.deny].slice(0, MOST),
   };

@@ -60,10 +60,12 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   lists Auto twice). Their files aren't read.
 - The Permissions page shows what each one's own settings let through, read and never written:
   Copilot's Allow all, as its sessions say it (off: it asks before a tool, a path or a URL; on: it
-  never asks); Grok's mode and rules from `~/.grok/config.toml` (`[ui] permission_mode`, or the older
-  `yolo`; `[permission] rules`) together with the permission rules it takes from Claude Code's
-  settings, yours in `~/.claude` and each agent folder's; and for Antigravity and Goose the mode a
-  session runs in. Cursor's own settings aren't read yet.
+  never asks); Grok's mode, its rules from `~/.grok/config.toml` (`[permission] rules`), and the
+  permission rules it takes from Claude Code's settings, yours in `~/.claude` and each agent
+  folder's. Grok takes its mode from a Claude Code `defaultMode` first (the most specific file's),
+  then from its own `[ui] permission_mode` (or the older `yolo`), else Ask, and the page says which
+  file set it. For Antigravity and Goose it shows the mode a session runs in. Cursor's own settings
+  aren't read yet.
 - An agent's refusal reaches the room in its own words: where JSON-RPC's message is only "Internal
   error", what its details say, as Grok's API answer ("Your Grok CLI version (0.2.99) is outdated …").
 - What signs one in from the environment is carried to the copy kept running: `CURSOR_API_KEY`,
