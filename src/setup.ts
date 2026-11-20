@@ -8,9 +8,9 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 import type { StopWords } from "@chipschat/harness";
-import { AcpClient, type AgentInfo, type AuthStatus, isAuthRequired, notOffered, type Wire } from "./acp.js";
+import { AcpClient, type AgentInfo, type AuthStatus, notOffered, type Wire } from "./acp.js";
 import type { KindConfig } from "./bridge.js";
-import { installWords, knownConfig, notInstalledStop, signedOutStop, signedOutWords } from "./kinds.js";
+import { headlessAuthOf, installWords, knownConfig, notInstalledStop, signedOutBy, signedOutStop, signedOutWords } from "./kinds.js";
 import { foldersPathOf, fromHome } from "./places.js";
 import { VERSION } from "./version.js";
 
@@ -107,7 +107,7 @@ export async function checkSignIn(
   kind: KindConfig,
   wire: Wire,
   cwd: string,
-  options: { waitMs?: number; stderr?: () => readonly string[] } = {},
+  options: { waitMs?: number; stderr?: () => readonly string[]; env?: NodeJS.ProcessEnv } = {},
 ): Promise<void> {
   let status: AuthStatus | undefined;
   let heard = () => {};
@@ -137,11 +137,21 @@ export async function checkSignIn(
         ...(last === "" ? {} : { doing: `It said: ${last}` }),
       });
     }
+    // An agent that opens no session until asked to sign in is asked first (Chips ADR 0301);
+    // refused, it is signed out. One that offers no way to is told so by the session it refuses.
+    const method = headlessAuthOf(kind, info.authMethods, { ...process.env, ...kind.env, ...options.env });
+    if (method !== undefined) {
+      try {
+        await within(client.authenticate(method), MINUTE, "it didn't answer within a minute");
+      } catch (error) {
+        throw new SetupError(`${signedOutWords(kind, info)} It said: ${wordsOf(error)}. ${STILL_GOOD}`, signedOutStop(kind));
+      }
+    }
     try {
       const { sessionId } = await within(client.newSession(cwd), MINUTE, "it didn't answer within a minute");
       if (info.closeSession) await client.closeSession(sessionId).catch(() => undefined);
     } catch (error) {
-      if (isAuthRequired(error)) throw new SetupError(`${signedOutWords(kind, info)} ${STILL_GOOD}`, signedOutStop(kind));
+      if (signedOutBy(kind, error)) throw new SetupError(`${signedOutWords(kind, info)} ${STILL_GOOD}`, signedOutStop(kind));
       throw new SetupError(`${kind.name} couldn't open a session: ${wordsOf(error)}. ${STILL_GOOD}`, {
         detail: "It couldn't open a session",
         says: `${kind.name} couldn't open a session: ${wordsOf(error)}.`,

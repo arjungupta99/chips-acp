@@ -12,6 +12,7 @@
 
 import { homedir } from "node:os";
 import type { Layer } from "./claude-settings.js";
+import type { KindMode } from "./kinds.js";
 import type { OwnModes } from "./modes.js";
 
 /** One thing the settings let through, ask about, or refuse, as Chips's `ownEntry` has it. */
@@ -222,6 +223,17 @@ export function codexOwnRules(mode: string): OwnRules {
     note: "Codex edits files and runs commands inside the agent's folder in its own sandbox, and asks before the network or anything outside that folder.",
     runs: [],
   };
+}
+
+/**
+ * The copy for a kind this bridge knows by name only (Chips ADR 0301): the mode its sessions run in,
+ * said in the kind's own words. What the agent's settings let through beside it, the bridge doesn't
+ * read, so it lists nothing it runs.
+ */
+export function modeOwnRules(name: string, running: string, mode: KindMode | undefined): OwnRules {
+  const read_from = [`the mode Chips starts each ${name} session in`];
+  if (mode === undefined) return { read_from, mode: running, runs: [] };
+  return { read_from, mode: mode.name, ...(mode.everything === true ? { everything: true } : {}), note: mode.words, runs: [] };
 }
 
 /**

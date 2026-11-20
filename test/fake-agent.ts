@@ -110,6 +110,8 @@ export interface FakeAgent {
   /** `<session>><copy>` for each session it copied. */
   readonly forks: string[];
   readonly closed: string[];
+  /** Each way it was asked to sign in by (`authenticate`). */
+  readonly authenticated: string[];
   /** The `_meta` of each session made, loaded or copied, as `<method> <session>` and the meta. */
   readonly metas: { readonly call: string; readonly meta: unknown }[];
   /** `<session> <option>=<value>` for each option it was set to, refused or not. */
@@ -127,6 +129,11 @@ export function fakeAgent(
     fork?: boolean;
     close?: boolean;
     auth?: "in" | "out";
+    /**
+     * Ways it signs in that it opens no session until asked to sign in by (`authenticate`), as
+     * Grok's; `refuse` says no to every one.
+     */
+    signIn?: { readonly methods: readonly string[]; readonly refuse?: boolean };
     refusesSessions?: boolean;
     compaction?: "claude" | "codex";
     model?: string;
@@ -151,6 +158,7 @@ export function fakeAgent(
     cwds: new Map(),
     forks: [],
     closed: [],
+    authenticated: [],
     starts: 0,
     spent: new Map(),
     wire: () => {
@@ -161,6 +169,8 @@ export function fakeAgent(
       let asked = 0;
       const waiting = new Map<number, (result: Message) => void>();
       const cancelled = new Set<string>();
+      /** Whether it was asked to sign in and said yes, where it has to be. */
+      let signedIn = options.signIn === undefined;
       const send = (message: Message) => {
         if (!gone) setImmediate(() => listener(JSON.stringify({ jsonrpc: "2.0", ...message })));
       };
@@ -552,7 +562,10 @@ export function fakeAgent(
                   },
                 },
                 agentInfo: { name: "fake-agent" },
-                authMethods: [{ id: "fake-login", name: "Fake sign-in" }],
+                authMethods:
+                  options.signIn === undefined
+                    ? [{ id: "fake-login", name: "Fake sign-in" }]
+                    : options.signIn.methods.map((method) => ({ id: method, name: method })),
               },
             });
             if (options.auth !== undefined) {
@@ -560,8 +573,18 @@ export function fakeAgent(
               setTimeout(() => send({ method: "_auth/status_update", params: { authStatus } }), 30);
             }
             return;
+          case "authenticate": {
+            agent.authenticated.push(String(params["methodId"]));
+            if (options.signIn?.refuse === true || !(options.signIn?.methods ?? []).includes(String(params["methodId"]))) {
+              send({ id, error: { code: -32000, message: "Authentication failed" } });
+              return;
+            }
+            signedIn = true;
+            send({ id, result: {} });
+            return;
+          }
           case "session/new": {
-            if (options.refusesSessions === true) {
+            if (options.refusesSessions === true || !signedIn) {
               send({ id, error: signedOut });
               return;
             }

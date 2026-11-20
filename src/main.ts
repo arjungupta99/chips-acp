@@ -24,7 +24,7 @@ import { processWire } from "./acp.js";
 import { forgetAdapter, makersFolder, pathWithLast, readyAdapter, withFetchedAdapter } from "./adapter.js";
 import { Bridge, type BridgeState, type KindConfig, settingsFor } from "./bridge.js";
 import { handsOver, keepIfAsked, stopIfAsked, stopping, words } from "./keep.js";
-import { adapterEnv, knownIdOf } from "./kinds.js";
+import { adapterEnv, keptEnvOf, knownIdOf, knownOf } from "./kinds.js";
 import { moveOld } from "./move.js";
 import { configPathOf, configTargetOf } from "./places.js";
 import { checkCommand, checkSignIn, readConfig, SetupError } from "./setup.js";
@@ -108,16 +108,17 @@ const joined = await joinChips({
     "new_agents",
     "forks",
     "restarts",
-    // Each agent's files and its model, for the kinds whose files and models the bridge knows, and
-    // every agent's context window.
-    ...(knownIdOf(kind) === undefined ? [] : ["context_files", "models"]),
+    // Each agent's files, for the kinds whose files the bridge reads; its model, for every kind it
+    // knows by name, of those its agent offers (Chips ADR 0301); and every agent's context window.
+    ...(knownIdOf(kind) === undefined ? [] : ["context_files"]),
+    ...(knownOf(kind) === undefined ? [] : ["models"]),
     "context_windows",
   ],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello. What signs its
 // agent in, where it is set, goes with it.
-keepIfAsked(LABEL, joined.url, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], log);
+keepIfAsked(LABEL, joined.url, keptEnvOf(kind), log);
 
 const kept = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as Partial<BridgeState>) : {};
 const state: BridgeState = {
@@ -164,8 +165,8 @@ bridge = new Bridge({
   chips,
   kind,
   projects: git.ok,
-  // Claude Code's and Codex's adapters offer their models as session options (Chips ADR 0241).
-  models: knownIdOf(kind) !== undefined,
+  // The kinds it knows by name offer their models as session options, where they offer any (Chips ADRs 0241, 0301).
+  models: knownOf(kind) !== undefined,
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
   wire: () => processWire(kind.command, kind.folder ?? kind.folders, env, (line) => log(`${kind.name}: ${line}`)),

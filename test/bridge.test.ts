@@ -1529,3 +1529,24 @@ describe("an agent that stops", () => {
     assert.ok(recordNamed(state, "Fakey") !== undefined);
   });
 });
+
+describe("an agent that opens no session until asked to sign in (Chips ADR 0301)", () => {
+  it("is asked as it starts, by what `grok login` saved, and then answers", async () => {
+    const agent = fakeAgent({ signIn: { methods: ["grok.com", "cached_token"] } });
+    const { chips } = await rig({ agent, command: ["grok", "--no-auto-update", "agent", "stdio"] });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    assert.deepEqual(agent.authenticated, ["cached_token"]);
+    assert.equal(agent.made.length, 1);
+  });
+
+  it("signed out, is asked nothing and its turn says how to sign in", async () => {
+    const agent = fakeAgent({ signIn: { methods: ["grok.com"] } });
+    const { chips } = await rig({ agent, command: ["grok", "--no-auto-update", "agent", "stdio"] });
+    await chips.say("Hello");
+    const failed = await sent(chips, "run.failed");
+    assert.match(String(failed.payload["error"]), /isn't signed in on this machine: run `grok login` in a new terminal/);
+    assert.deepEqual(agent.authenticated, []);
+    assert.deepEqual(agent.made, []);
+  });
+});

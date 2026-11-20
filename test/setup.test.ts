@@ -100,6 +100,29 @@ describe("the agent started and signed in, before the link is taken up", () => {
     );
   });
 
+  it("asks an agent that opens no session until asked to sign in, as Grok does, by its key where one is set", async () => {
+    const grok = { name: "Grok", command: ["grok", "--no-auto-update", "agent", "stdio"], folders: folder };
+    const saved = fakeAgent({ signIn: { methods: ["grok.com", "cached_token"] } });
+    await checkSignIn(grok, saved.wire(), folder, { env: { XAI_API_KEY: "" } });
+    assert.deepEqual(saved.authenticated, ["cached_token"]);
+    assert.equal(saved.made.length, 1);
+    const keyed = fakeAgent({ signIn: { methods: ["grok.com", "xai.api_key", "cached_token"] } });
+    await checkSignIn(grok, keyed.wire(), folder, { env: { XAI_API_KEY: "xai-test" } });
+    assert.deepEqual(keyed.authenticated, ["xai.api_key"]);
+  });
+
+  it("stops on an agent that offers no way to sign in with nobody at a browser, or refuses the one it offers", async () => {
+    const grok = { name: "Grok", command: ["grok", "--no-auto-update", "agent", "stdio"], folders: folder };
+    const signedOut = /^Grok isn't signed in on this machine: run `grok login` in a new terminal, or `grok login --device-auth` on a machine with no screen\./;
+    // Signed out, it offers only its browser's sign-in: nothing is asked, and its session is refused.
+    const out = fakeAgent({ signIn: { methods: ["grok.com"] } });
+    await assert.rejects(checkSignIn(grok, out.wire(), folder, { env: {} }), stopsWith(signedOut));
+    assert.deepEqual(out.authenticated, []);
+    const refused = fakeAgent({ signIn: { methods: ["cached_token"], refuse: true } });
+    await assert.rejects(checkSignIn(grok, refused.wire(), folder, { env: {} }), stopsWith(signedOut));
+    assert.deepEqual(refused.made, []);
+  });
+
   it("stops when it doesn't start, with what it said", async () => {
     const dead: Wire = {
       write: () => undefined,

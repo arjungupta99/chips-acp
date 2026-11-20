@@ -5,7 +5,8 @@
  *
  * The agent itself is the person's to install, from its maker, and to sign in to. It is asked for
  * first, so nobody downloads hundreds of megabytes to be told it's missing. An adapter already on
- * the PATH is used as it is, and nothing is fetched for a kind whose `fetches` is off.
+ * the PATH is used as it is, and nothing is fetched for a kind whose `fetches` is off, nor for an
+ * agent that speaks ACP itself (Chips ADR 0301): found, it is ready.
  */
 
 import { spawn } from "node:child_process";
@@ -49,7 +50,9 @@ export const pathWithLast = (path: string | undefined, folder: string): string =
 /** The kind as it should run: on the adapter fetched for it, when its own isn't on the PATH. */
 export function withFetchedAdapter(kind: KindConfig, env: NodeJS.ProcessEnv = process.env, home: string = homedir()): KindConfig {
   const known = knownOf(kind);
-  if (known === undefined || kind.command[0] !== known.program || onPath(known.program, pathOf(kind, env))) return kind;
+  if (known === undefined || known.adapter === undefined || kind.command[0] !== known.program || onPath(known.program, pathOf(kind, env))) {
+    return kind;
+  }
   const fetched = fetchedAt(known.id, known.program, home);
   return runnable(fetched) ? { ...kind, command: [fetched, ...kind.command.slice(1)] } : kind;
 }
@@ -133,7 +136,9 @@ export async function readyAdapter(kind: KindConfig, options: ReadyOptions = {})
     );
   }
   const npm = env["CHIPS_NPM"];
-  if (!known.fetches || npm === undefined || npm === "") return kind;
+  // An agent that speaks ACP itself has nothing to fetch: found, it is ready.
+  if (!known.fetches || known.adapter === undefined || npm === undefined || npm === "") return kind;
+  const adapter = known.adapter;
   const folder = adapterFolder(known.id, home);
   // Its link stays out of what npm is handed; npm's own node comes first, as the bridge's does.
   const { CHIPS_JOIN_LINK: _link, ...rest } = env;
@@ -145,7 +150,7 @@ export async function readyAdapter(kind: KindConfig, options: ReadyOptions = {})
       node,
       npm,
       folder,
-      spec: `${known.adapter}@${known.adapterMajor}`,
+      spec: `${adapter}@${known.adapterMajor ?? 0}`,
       env: { ...rest, PATH: `${dirname(node)}${delimiter}${rest["PATH"] ?? ""}` },
     });
   } catch (error) {
@@ -156,7 +161,7 @@ export async function readyAdapter(kind: KindConfig, options: ReadyOptions = {})
   const ready = withFetchedAdapter(kind, env, home);
   if (ready.command[0] === known.program) {
     rmSync(folder, { recursive: true, force: true });
-    throw new SetupError(`${known.adapter} installed, but it has no ${known.program}. ${STILL_GOOD}`, adapterFailedStop(kind.name));
+    throw new SetupError(`${adapter} installed, but it has no ${known.program}. ${STILL_GOOD}`, adapterFailedStop(kind.name));
   }
   return ready;
 }

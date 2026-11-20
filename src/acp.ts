@@ -1,7 +1,7 @@
 /**
  * One ACP agent, as a process this bridge runs: JSON-RPC 2.0, a message per line, over the
  * agent's stdin and stdout (the Agent Client Protocol's stdio transport, v1). The bridge is the
- * client: it calls `initialize`, `session/new`, `session/load`, `session/fork`, `session/close`,
+ * client: it calls `initialize`, `authenticate`, `session/new`, `session/load`, `session/fork`, `session/close`,
  * `session/prompt`, `session/set_mode`, `session/set_config_option`, and notifies `session/cancel`; the agent notifies `session/update`
  * and asks `session/request_permission` and `elicitation/create`, which the bridge answers.
  *
@@ -165,6 +165,14 @@ export class AcpClient {
       reportsAuth: meta["authStatus"] !== undefined && meta["authStatus"] !== null,
       ...(typeof info["name"] === "string" ? { name: info["name"] } : {}),
     };
+  }
+
+  /**
+   * Sign in by a way the agent offered at `initialize` that needs nobody at a browser: Grok's saved
+   * sign-in or its API key (Chips ADR 0301). Refused, it says why.
+   */
+  async authenticate(methodId: string): Promise<void> {
+    await this.call("authenticate", { methodId, _meta: { headless: true } });
   }
 
   /**

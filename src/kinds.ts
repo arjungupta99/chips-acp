@@ -1,10 +1,15 @@
 /**
  * The kinds of ACP agent this bridge knows by name, so the gallery's cards need no config written
- * first: how each is run, the mode that makes it ask, its adapter's package, and how a person
- * signs it in. Any other kind runs from a config that names it.
+ * first: how each is run, the mode that makes it ask, its adapter's package where it needs one, and
+ * how a person signs it in. Any other kind runs from a config that names it.
+ *
+ * Claude Code and Codex speak ACP through an adapter, a second program from npm. The others speak
+ * it themselves, the agent's own command with a word or two after it (`goose acp`), so there is
+ * nothing to fetch: the person installs the agent from its maker and signs it in, and that is all
+ * (Chips ADR 0301).
  */
 
-import type { AgentInfo } from "./acp.js";
+import { AcpError, type AgentInfo, isAuthRequired } from "./acp.js";
 import type { StopWords } from "@chipschat/harness";
 import type { KindConfig } from "./bridge.js";
 
@@ -12,11 +17,14 @@ interface Known {
   /** The config's file name without `.json`, as the gallery's cards give it: `claude-code`. */
   readonly id: string;
   readonly name: string;
-  /** Its ACP adapter's command, and the npm package it comes in. */
+  /** The command that speaks ACP: its adapter's (`codex-acp`), or the agent's own (`goose`). */
   readonly program: string;
-  readonly adapter: string;
+  /** What follows it, for an agent that speaks ACP itself: `["acp"]` for `goose acp`. */
+  readonly args?: readonly string[];
+  /** The npm package its adapter comes in, for an agent that needs one: none for one that speaks ACP itself. */
+  readonly adapter?: string;
   /** The adapter's major this bridge speaks to: what `npm install` is asked for. */
-  readonly adapterMajor: number;
+  readonly adapterMajor?: number;
   /**
    * Whether the bridge may fetch the adapter itself when a person's Connect needs it (Chips ADR
    * 0288). Claude Code's stays off until Anthropic has said whether a product like Chips may reach
@@ -31,7 +39,11 @@ interface Known {
    * the folder until a new one is opened, so the bridge looks there too (`makersFolder`).
    */
   readonly installedIn: string;
-  readonly mode: string;
+  /**
+   * The mode its sessions start in, the one that asks, where Chips may pick one. None leaves each
+   * session in the mode the agent's own settings give it, and Chips offers no pick.
+   */
+  readonly mode?: string;
   /** The modes a person may pick in Chips for its sessions, `mode` among them, in their order. */
   readonly modes: readonly KindMode[];
   /** What a person does to sign it in, in a terminal, and on a machine with no screen where that differs. */
@@ -40,6 +52,20 @@ interface Known {
   /** The same for Chips for Mac's sheet: the line to copy, and what to do with it. */
   readonly signInLine: string;
   readonly signInDoing: string;
+  /** What signs it in from the environment, where it may be: carried to the copy kept running. */
+  readonly keys?: readonly string[];
+  /**
+   * The ways it signs in with nobody at a browser, the first it offers taken, where it has to be
+   * asked to (`authenticate`) before it opens a session; one with `env` only while that is set.
+   */
+  readonly headless?: readonly { readonly id: string; readonly env?: string }[];
+  /**
+   * How it refuses a session while it has nothing to run on, where that isn't ACP's sign-in
+   * refusal: Goose with no model provider set up says so in an internal error.
+   */
+  readonly unready?: RegExp;
+  /** What it lacks when it can't run, where that isn't a sign-in: Goose's model provider. */
+  readonly lacks?: { readonly detail: string; readonly says: string };
 }
 
 const SIGN_IN_DOING = "Run this in Terminal, then try again. Your browser opens to sign in.";
@@ -85,6 +111,27 @@ const CODEX_MODES: readonly KindMode[] = [
   },
 ];
 
+/**
+ * Antigravity's, as `agy acp` offers them. Plan is left out, as Claude Code's is. Auto is offered
+ * only where Antigravity has it: a personal Google account with its terminal sandbox on. It has no
+ * mode that never asks.
+ */
+const ANTIGRAVITY_MODES: readonly KindMode[] = [
+  { id: "default", name: "Default", words: "Asks before edits and commands its settings don't allow." },
+  { id: "accept-edits", name: "Accept edits", words: "Edits files in its folder without asking. Commands still ask." },
+  { id: "auto", name: "Auto", words: "Edits files and runs safe commands without asking. Asks before anything it can't undo." },
+];
+
+/**
+ * Goose's, as it names them. It starts in Auto, which never asks, unless `GOOSE_MODE` says
+ * otherwise, so the bridge puts each session in Approve.
+ */
+const GOOSE_MODES: readonly KindMode[] = [
+  { id: "approve", name: "Approve", words: "Asks before every tool call its own permission list doesn't settle." },
+  { id: "smart_approve", name: "Smart approve", words: "Reads on its own. Goose judges the rest and asks only about ones it finds risky." },
+  { id: "auto", name: "Auto", words: "Never asks. Whatever it does just happens.", everything: true },
+];
+
 const KNOWN: readonly Known[] = [
   {
     id: "claude-code",
@@ -120,18 +167,162 @@ const KNOWN: readonly Known[] = [
     signInLine: "codex login",
     signInDoing: SIGN_IN_DOING,
   },
+  {
+    id: "cursor",
+    name: "Cursor",
+    // The installer links `agent` too, a name other programs use: the legacy one is Cursor's alone.
+    program: "cursor-agent",
+    args: ["acp"],
+    fetches: false,
+    agent: "cursor-agent",
+    installLine: "curl https://cursor.com/install -fsS | bash",
+    installedIn: ".local/bin",
+    // Agent, Plan and Ask are ways of working, not how much it may do: that is its own
+    // `approvalMode` and permission lists, which edits in its folder never ask past.
+    modes: [],
+    signIn: "run `cursor-agent login`",
+    signInNoScreen: "`NO_OPEN_BROWSER=1 cursor-agent login`, then open the address it prints",
+    signInLine: "cursor-agent login",
+    signInDoing: SIGN_IN_DOING,
+    // Never asked to sign in over ACP: signed out, that opens a browser on this machine each time.
+    keys: ["CURSOR_API_KEY"],
+  },
+  {
+    id: "goose",
+    name: "Goose",
+    program: "goose",
+    args: ["acp"],
+    fetches: false,
+    agent: "goose",
+    installLine: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash",
+    installedIn: ".local/bin",
+    mode: "approve",
+    modes: GOOSE_MODES,
+    // Goose has no account: it runs on a model provider a person picks, with that provider's key.
+    signIn: "run `goose configure` and pick a model provider",
+    signInLine: "goose configure",
+    signInDoing: "Run this in Terminal, then try again. It asks which model provider to use, and for its key.",
+    keys: ["GOOSE_PROVIDER", "GOOSE_MODEL", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"],
+    unready: /GOOSE_PROVIDER|resolve provider and model/,
+    lacks: { detail: "No model provider", says: "has no model provider set up" },
+  },
+  {
+    id: "copilot",
+    name: "Copilot",
+    program: "copilot",
+    args: ["--acp"],
+    fetches: false,
+    agent: "copilot",
+    installLine: "curl -fsSL https://gh.io/copilot-install | bash",
+    installedIn: ".local/bin",
+    // Its session modes are Agent, Plan and Autopilot, ways of working rather than how much it may
+    // do: whether it asks is its Allow all option, off unless the person's settings turn it on.
+    // Chips puts it in neither, so each session asks as Copilot's own settings say.
+    modes: [],
+    signIn: "run `copilot login`",
+    signInNoScreen: "`copilot login --device-code`",
+    signInLine: "copilot login",
+    signInDoing: SIGN_IN_DOING,
+    // Only Copilot's own: GH_TOKEN and GITHUB_TOKEN are the gh command's too, and Copilot lets
+    // either beat the sign-in it saved.
+    keys: ["COPILOT_GITHUB_TOKEN"],
+  },
+  {
+    id: "antigravity",
+    name: "Antigravity",
+    program: "agy",
+    args: ["acp"],
+    fetches: false,
+    agent: "agy",
+    installLine: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    installedIn: ".local/bin",
+    mode: "default",
+    modes: ANTIGRAVITY_MODES,
+    // Its sign-in for ACP gives a link to open and takes back the code Google shows, so it works
+    // the same on a machine with no screen.
+    signIn: "run `agy acp --login` and paste back the code it asks for",
+    signInLine: "agy acp --login",
+    signInDoing: "Run this in Terminal, then try again. It gives you a Google sign-in link; paste back the code you get.",
+    keys: ["GEMINI_API_KEY"],
+  },
+  {
+    id: "grok",
+    name: "Grok",
+    program: "grok",
+    // Grok updates itself in the background unless told not to, which xAI asks of anything that
+    // runs it as an ACP agent: the person's own `grok` in a terminal still keeps itself current.
+    args: ["--no-auto-update", "agent", "stdio"],
+    fetches: false,
+    agent: "grok",
+    installLine: "curl -fsSL https://x.ai/cli/install.sh | bash",
+    installedIn: ".grok/bin",
+    // Its Ask, Auto and Always-approve aren't modes its ACP sessions offer to be put in: each
+    // session runs in the one Grok's own config gives it, Ask unless the person changed it.
+    modes: [],
+    signIn: "run `grok login`",
+    signInNoScreen: "`grok login --device-auth`",
+    signInLine: "grok login",
+    signInDoing: SIGN_IN_DOING,
+    keys: ["XAI_API_KEY"],
+    // It opens no session until asked to sign in, as xAI's own ACP example does: by its API key
+    // where one is set, else by what `grok login` saved. Signed out, it offers neither.
+    headless: [{ id: "xai.api_key", env: "XAI_API_KEY" }, { id: "cached_token" }],
+  },
 ];
 
 /** The config a known kind runs on when its file isn't there: `claude-code` for `claude-code.json`. */
 export function knownConfig(id: string): Omit<KindConfig, "folders"> | undefined {
   const known = KNOWN.find((each) => each.id === id);
-  return known === undefined ? undefined : { name: known.name, command: [known.program], mode: known.mode };
+  if (known === undefined) return undefined;
+  return {
+    name: known.name,
+    command: [known.program, ...(known.args ?? [])],
+    ...(known.mode === undefined ? {} : { mode: known.mode }),
+  };
 }
 
 const knownBy = (kind: KindConfig) => {
   const program = kind.command[0]?.split("/").pop();
   return KNOWN.find((each) => each.program === program);
 };
+
+/** Whether a known kind is an agent that speaks ACP itself, with no adapter to install or fetch. */
+export const speaksAcp = (known: Pick<Known, "adapter">): boolean => known.adapter === undefined;
+
+/**
+ * Whether the agent refused because it isn't signed in or set up: ACP's sign-in refusal, or the
+ * kind's own way of saying it has nothing to run on.
+ */
+export function signedOutBy(kind: KindConfig, error: unknown): boolean {
+  if (isAuthRequired(error)) return true;
+  const unready = knownBy(kind)?.unready;
+  if (unready === undefined || !(error instanceof AcpError)) return false;
+  const data = typeof error.data === "string" ? error.data : JSON.stringify(error.data ?? "");
+  return unready.test(`${error.message} ${data}`);
+}
+
+/**
+ * The way the agent is to be asked to sign in before it opens a session, of those it offered at
+ * `initialize`: nothing for a kind that needs no asking, or where it offers no way that needs
+ * nobody at a browser, which is a signed-out agent, and its first session says so.
+ */
+export function headlessAuthOf(
+  kind: KindConfig,
+  offered: readonly { readonly id: string }[],
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  return knownBy(kind)?.headless?.find(
+    (way) => offered.some((method) => method.id === way.id) && (way.env === undefined || (env[way.env] ?? "") !== ""),
+  )?.id;
+}
+
+/**
+ * What signs the agents in from the environment, carried to the copy kept running (`keep.ts`): what
+ * Claude Code and Codex read, and the kind's own.
+ */
+export function keptEnvOf(kind: KindConfig): readonly string[] {
+  return ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR", ...(knownBy(kind)?.keys ?? [])];
+}
 
 /**
  * The modes a person may pick for a kind's sessions from Chips: a kind this bridge knows by name,
@@ -147,11 +338,16 @@ export function modesOf(kind: KindConfig): readonly KindMode[] {
 /** What this bridge knows of the kind a config runs, for getting its adapter (`adapter.ts`). */
 export const knownOf = (kind: KindConfig): Known | undefined => knownBy(kind);
 
-/** Which of the kinds this bridge knows by name a config runs, by its command: `claude-code`, `codex`. */
+/**
+ * Which of the kinds whose files and settings this bridge reads a config runs, by its command:
+ * `claude-code`, `codex`. The others it knows by name only for how they're installed, signed in and
+ * put in a mode, so their agents' files and own rules aren't read (Chips ADR 0301).
+ */
 export type KnownId = "claude-code" | "codex";
 
 export function knownIdOf(kind: KindConfig): KnownId | undefined {
-  return knownBy(kind)?.id as KnownId | undefined;
+  const id = knownBy(kind)?.id;
+  return id === "claude-code" || id === "codex" ? id : undefined;
 }
 
 /**
@@ -197,9 +393,8 @@ export function codexDocBytes(env: NodeJS.ProcessEnv): number {
 /** How to install a kind's adapter, where it is one this bridge knows. */
 export function installWords(kind: KindConfig): string {
   const known = knownBy(kind);
-  return known === undefined
-    ? "install the agent's ACP adapter its own way, or name it by its path in the config"
-    : `install it with \`npm install -g ${known.adapter}\``;
+  if (known === undefined) return "install the agent's ACP adapter its own way, or name it by its path in the config";
+  return speaksAcp(known) ? `install it with \`${known.installLine}\`` : `install it with \`npm install -g ${known.adapter}\``;
 }
 
 /** What to tell a person whose agent refused because it isn't signed in. */
@@ -208,7 +403,7 @@ export function signedOutWords(kind: KindConfig, info?: AgentInfo): string {
   // A new terminal, since one the agent was just installed in doesn't know its command yet.
   if (known !== undefined) {
     const noScreen = known.signInNoScreen === undefined ? "" : `, or ${known.signInNoScreen} on a machine with no screen`;
-    return `${kind.name} isn't signed in on this machine: ${known.signIn} in a new terminal${noScreen}.`;
+    return `${kind.name} ${known.lacks?.says ?? "isn't signed in"} on this machine: ${known.signIn} in a new terminal${noScreen}.`;
   }
   const ways = (info?.authMethods ?? []).map((method) => method.name);
   return `${kind.name} isn't signed in on this machine: sign it in its own way${ways.length > 0 ? ` (${ways.join(", ")})` : ""}.`;
@@ -224,6 +419,8 @@ export function notInstalledStop(kind: KindConfig, program: string): StopWords {
       doing: "Install the agent's ACP adapter its own way, then try again.",
     };
   }
+  // An agent that speaks ACP itself is the program: what's missing is the agent.
+  if (speaksAcp(known)) return agentMissingStop(known);
   return {
     detail: `${kind.name} can't join Chips yet`,
     says: `${kind.name} needs one more piece to join Chips.`,
@@ -255,8 +452,8 @@ export function adapterFailedStop(name: string): StopWords {
 export function signedOutStop(kind: KindConfig): StopWords {
   const known = knownBy(kind);
   return {
-    detail: "Not signed in",
-    says: `${kind.name} isn't signed in.`,
+    detail: known?.lacks?.detail ?? "Not signed in",
+    says: `${kind.name} ${known?.lacks?.says ?? "isn't signed in"}.`,
     ...(known === undefined
       ? { doing: "Sign it in its own way, then try again." }
       : { doing: known.signInDoing, copy: known.signInLine }),

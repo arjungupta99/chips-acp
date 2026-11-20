@@ -1,7 +1,8 @@
 # chips-acp
 
 An agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) — Claude
-Code, Codex, Goose, Gemini — as a Chips harness, one kind per harness. People make its agents from
+Code, Codex, Cursor, Copilot, Antigravity, Goose, Grok, or any other — as a Chips harness, one kind
+per harness. People make its agents from
 Chips: a room from the +, a new agent from a room's Add page, a copy with Fork. Each agent works in a
 folder of its own; each room it is in is one ACP session of it. There is no Main agent. The bridge
 runs the agent's process, so the bridge is the harness (Chips ADR 0041), built on `@chipschat/harness`.
@@ -19,6 +20,46 @@ that Chips carries, so the machine needs no Node or npm of its own. The agent it
 joins, and keeps itself running from login. `chips disconnect claude-code` or `chips disconnect codex` stops it. Claude Code and Codex share this one package: their cards hand it `~/Chips/.bridges/acp/claude-code.json` or `codex.json`, and the file's name picks the kind. On another computer,
 `curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect claude-code` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
+
+## The agents it knows by name
+
+Each of these needs no config: its card hands the bridge `~/Chips/.bridges/acp/<id>.json`, and
+the file's name picks the kind. Claude Code and Codex speak ACP through an adapter from npm; the
+others speak it themselves, so there is nothing to fetch (Chips ADR 0301). The person installs the
+agent from its maker and signs it in; the bridge asks for each in turn, with the maker's line, and
+also looks where that line puts the agent, since a terminal opened before doesn't know the folder.
+
+| Id | Runs | Install | Sign in | Modes Chips may pick |
+|---|---|---|---|---|
+| `claude-code` | `claude-agent-acp` | `curl -fsSL https://claude.ai/install.sh \| bash`, then the adapter | `claude auth login` | Default, Accept edits, Auto, Bypass permissions |
+| `codex` | `codex-acp` (fetched) | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `codex login` | Read-only, Workspace access, Auto review, Full access |
+| `cursor` | `cursor-agent acp` | `curl https://cursor.com/install -fsS \| bash` | `cursor-agent login` | none |
+| `copilot` | `copilot --acp` | `curl -fsSL https://gh.io/copilot-install \| bash` | `copilot login` | none |
+| `antigravity` | `agy acp` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy acp --login` | Default, Accept edits, Auto |
+| `goose` | `goose acp` | Goose's `download_cli.sh` | `goose configure` (a model provider and its key) | Approve, Smart approve, Auto |
+| `grok` | `grok --no-auto-update agent stdio` | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `grok login` | none |
+
+- **Cursor** and **Copilot** offer modes that are ways of working (Agent, Plan, Ask; Agent, Plan,
+  Autopilot), not how much they may do, so Chips puts them in none: each session asks as the agent's
+  own settings say (Cursor's `approvalMode`, which never asks about edits in its folder; Copilot's
+  Allow all, off unless turned on). Cursor is never asked to sign in over ACP: signed out, that
+  opens a browser on the machine each time.
+- **Goose** starts in Auto, which never asks, unless `GOOSE_MODE` says otherwise, so each session
+  goes into Approve. With no model provider set up it refuses a session with an internal error
+  naming `GOOSE_PROVIDER`, which the bridge says as "Goose has no model provider set up".
+- **Grok** opens no session until it is asked to sign in (`authenticate`), as xAI's own ACP example
+  does: by its API key where `XAI_API_KEY` is set, else by what `grok login` saved. Signed out, it
+  offers neither, and its session is refused. Its ACP sessions have no mode to be put in.
+- **Antigravity**'s Auto is offered only where Antigravity has it: a personal Google account with
+  its terminal sandbox on.
+- None of the five copies a session (`session/fork`), so their cards leave Fork off. Cursor, Copilot,
+  Goose and Grok offer their models as a session's `model` option, where they do, and the bridge
+  offers them in Chips as it does Claude Code's and Codex's. Their files and own settings aren't
+  read: the Permissions page shows the mode a session runs in, where Chips may pick one.
+- What signs one in from the environment is carried to the copy kept running: `CURSOR_API_KEY`,
+  `COPILOT_GITHUB_TOKEN` (not `GH_TOKEN` or `GITHUB_TOKEN`, which are the gh command's too and
+  would beat Copilot's saved sign-in), `GEMINI_API_KEY`, `XAI_API_KEY`, and Goose's
+  `GOOSE_PROVIDER`, `GOOSE_MODEL`, `GOOGLE_API_KEY` and `OPENROUTER_API_KEY`.
 
 ## Run it
 
@@ -189,8 +230,8 @@ permissions, and each permission it asks for is an approval card.
 
 ### What Chips shows on an agent's page
 
-The bridge says `context` and `models` (Claude Code and Codex) and `context_windows` (every kind)
-in its hello, and sends each agent's copies when it starts and as they change. Chips draws them
+The bridge says `context` (Claude Code and Codex), `models` (every kind it knows by name) and
+`context_windows` (every kind) in its hello, and sends each agent's copies when it starts and as they change. Chips draws them
 where the harness is granted `context_files`, `models` and `context_windows`.
 
 | Chips | Claude Code | Codex | Another kind |
@@ -201,7 +242,7 @@ where the harness is granted `context_files`, `models` and `context_windows`.
 | Context window | `usage_update` of the agent's session that said last; the window from the update that ends a turn (it carries the cost), as one before may be a default | `usage_update` | `usage_update` |
 | Compact now | `/compact` said to that session as a turn of its own, after any turn going there; its words go nowhere; from and to from its tool call's `rawOutput` | the same; to from the `usage_update` it sends as it finishes | where it lists `compact` among its commands |
 | Its limit | its own from `autoCompactWindow` in its settings (`modelSettings` per model), about 33,000 tokens short of it; a pick from Chips goes in each session's `_meta.claudeCode.options.settings`, never in a file; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` beats both, and the limit can't be changed then | the bridge's: after a turn that ends at or past it, the bridge compacts that session; off unless picked | as Codex, where it has `compact` |
-| Model | the models its adapter offers for a session (the `model` option), each with its levels (`effort`, without its `default`), by the adapter's own names (its `xhigh` is Extra high); Same as "Claude Code's default" is what a new session starts on: `model` in its settings, or its own `default` | the same, with `reasoning_effort`; the default from Codex's config, which may be a model its list leaves out, with no levels | none |
+| Model | the models its adapter offers for a session (the `model` option), each with its levels (`effort`, without its `default`), by the adapter's own names (its `xhigh` is Extra high); Same as "Claude Code's default" is what a new session starts on: `model` in its settings, or its own `default` | the same, with `reasoning_effort`; the default from Codex's config, which may be a model its list leaves out, with no levels | for a kind it knows by name, the same where its agent offers a `model` option (and a `thought_level` one for its levels); none for any other |
 | Where it learns them | each time the bridge starts the agent, a session opened in the harness's folder and put on each model in turn, then closed, with nothing said to it; a model it won't be put on isn't offered | the same | |
 | A pick | set on each of the agent's sessions with `session/set_config_option`, now and as each opens after, never in a file; kept with the agent, and a copy from Fork starts with its original's. Same as again puts each back on the default, and its level on Claude Code's `default`, which follows its settings | the same; a session Codex won't put back on a model its list leaves out is let go and loaded again before its next turn | |
 

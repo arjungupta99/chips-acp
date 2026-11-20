@@ -90,7 +90,6 @@ import {
   type AuthStatus,
   type ConfigOption,
   configOptionsOf,
-  isAuthRequired,
   notOffered,
   type SessionUpdate,
   type Wire,
@@ -98,9 +97,9 @@ import {
 import { readLayer, settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
-import { adapterEnv, codexDocBytes, type KnownId, knownIdOf, modesOf, signedOutWords } from "./kinds.js";
+import { adapterEnv, codexDocBytes, headlessAuthOf, type KnownId, knownIdOf, knownOf, modesOf, signedOutBy, signedOutWords } from "./kinds.js";
 import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, pickedMode, withCurrent } from "./modes.js";
-import { claudeOwnRules, codexOwnRules, type OwnRules, type PlacedLayer, sendOwnRules } from "./own-rules.js";
+import { claudeOwnRules, codexOwnRules, modeOwnRules, type OwnRules, type PlacedLayer, sendOwnRules } from "./own-rules.js";
 import { VERSION } from "./version.js";
 import {
   type Catalog,
@@ -848,6 +847,13 @@ export class Bridge {
       proc.info = await client.initialize({ name: "chips-acp", version: VERSION });
       proc.failures = 0;
       this.log(`${name} is running${proc.info.name === undefined ? "" : ` (${proc.info.name})`}`);
+      // An agent that opens no session until asked to sign in is asked now (Chips ADR 0301).
+      const method = headlessAuthOf(this.options.kind, proc.info.authMethods, this.env);
+      if (method !== undefined) {
+        await client
+          .authenticate(method)
+          .catch((error: unknown) => this.log(`${signedOutWords(this.options.kind, proc.info)} It said: ${messageOf(error)}`));
+      }
       // What it offers to run on, each time it starts: an update may have changed it (Chips ADR 0241).
       if (this.options.models === true) void this.look(client);
     } catch (error) {
@@ -871,7 +877,7 @@ export class Bridge {
 
   /** What a turn's failure says: how to sign in when that's why, else the agent's own words. */
   private failure(record: AgentRecord, error: unknown, what = ""): string {
-    if (isAuthRequired(error)) return `${signedOutWords(this.options.kind, this.process.info)} Then send this again.`;
+    if (signedOutBy(this.options.kind, error)) return `${signedOutWords(this.options.kind, this.process.info)} Then send this again.`;
     return `${record.name}${what}: ${messageOf(error)}`;
   }
 
@@ -1163,7 +1169,7 @@ export class Bridge {
     try {
       turn.sessionId = await this.sessionFor(record, client, spaceId);
     } catch (error) {
-      if (!run.over) await run.fail({ error: this.failure(record, error, " couldn't open a session"), retryable: isAuthRequired(error) });
+      if (!run.over) await run.fail({ error: this.failure(record, error, " couldn't open a session"), retryable: signedOutBy(this.options.kind, error) });
       return;
     }
     const { sessionId } = turn;
@@ -1733,6 +1739,13 @@ export class Bridge {
 
   private ownRulesNow(): OwnRules | undefined {
     if (this.knownKind === "codex") return codexOwnRules(this.runningMode() ?? "workspace-write");
+    if (this.knownKind === undefined) {
+      // A kind known by name only says the mode it runs in, where it has one Chips may pick (Chips ADR 0301).
+      const { kind } = this.options;
+      const running = this.runningMode();
+      if (knownOf(kind) === undefined || running === undefined || modesOf(kind).length === 0) return undefined;
+      return modeOwnRules(kind.name, running, modesOf(kind).find((mode) => mode.id === running));
+    }
     if (this.knownKind !== "claude-code") return undefined;
     const userPath = join(this.places.claudeHome, "settings.json");
     const folders = [...new Set(this.records().map((record) => record.folder))].flatMap((folder): PlacedLayer[] =>
@@ -2424,10 +2437,10 @@ export class Bridge {
 }
 
 /**
- * What a person changes about the harness's agents from their pages (Chips ADRs 0134, 0146, 0241),
- * for `connect({ settings })`: their files and their models, for Claude Code and Codex, whose files
- * and model options this bridge knows; and their context windows, for any kind. `bridge` is the one
- * running, once it is.
+ * What a person changes about the harness's agents from their pages (Chips ADRs 0134, 0146, 0241,
+ * 0301), for `connect({ settings })`: their files, for Claude Code and Codex, whose files this
+ * bridge reads; their models, for every kind it knows by name, of those its agent offers; and their
+ * context windows, for any kind. `bridge` is the one running, once it is.
  */
 export function settingsFor(kind: KindConfig, bridge: () => Bridge | undefined): SettingsHandlers {
   const active = (): Bridge => {
@@ -2436,12 +2449,8 @@ export function settingsFor(kind: KindConfig, bridge: () => Bridge | undefined):
     return running;
   };
   return {
-    ...(knownIdOf(kind) === undefined
-      ? {}
-      : {
-          context: (edit: ContextEditFrame) => active().contextEdited(edit),
-          models: (change: ModelChangeFrame) => active().modelChange(change),
-        }),
+    ...(knownIdOf(kind) === undefined ? {} : { context: (edit: ContextEditFrame) => active().contextEdited(edit) }),
+    ...(knownOf(kind) === undefined ? {} : { models: (change: ModelChangeFrame) => active().modelChange(change) }),
     contextWindows: {
       compact: (ask) => active().windowCompact(ask),
       change: (ask) => active().windowChange(ask),
