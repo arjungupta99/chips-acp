@@ -204,7 +204,7 @@ export function codexOwnRules(mode: string): OwnRules {
     return {
       read_from,
       mode: name,
-      note: "Codex reads on its own and asks before it changes a file or runs anything else.",
+      note: "Codex reads on its own and changes nothing without a yes: it asks first, or says it can't.",
       runs: [],
     };
   }

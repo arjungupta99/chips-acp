@@ -126,7 +126,7 @@ its asks). Then nothing reaches Chips as a card. Put them where they ask:
 - Claude Code still follows its own settings (`~/.claude/settings.json`). What they allow, it
   does without asking, and read-only commands never ask.
 - Codex in `workspace-write` changes its folder freely and asks before the network or anything
-  outside it. `read-only` asks before any change.
+  outside it. `read-only` changes nothing without a yes: Codex asks first, or says it can't.
 - The bridge tells Chips what those settings let through (Chips ADR 0299), for the harness's
   Permissions page: Claude Code's `permissions` lists from your settings and each agent's folder,
   and the mode; for Codex, its mode. It reads them and never writes them. Needs Chips SDK 1.0.10;

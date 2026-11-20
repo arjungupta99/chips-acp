@@ -70,7 +70,7 @@ const CLAUDE_MODES: readonly KindMode[] = [
 
 /** Codex's, as codex-acp offers them. */
 const CODEX_MODES: readonly KindMode[] = [
-  { id: "read-only", name: "Read-only", words: "Reads on its own. Asks before it changes a file or runs anything else." },
+  { id: "read-only", name: "Read-only", words: "Reads on its own. Changes nothing without a yes: it asks first, or says it can't." },
   {
     id: "workspace-write",
     name: "Workspace access",
