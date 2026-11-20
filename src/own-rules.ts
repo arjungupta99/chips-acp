@@ -237,6 +237,112 @@ export function modeOwnRules(name: string, running: string, mode: KindMode | und
 }
 
 /**
+ * Copilot's copy (Chips ADR 0301): its Allow all, as each session it opens says it (the option of
+ * category `permissions`). Copilot keeps no rules on disk: what it lets through beside that is a yes
+ * given in a session, for that session.
+ */
+export function copilotOwnRules(allowAll: string | undefined): OwnRules {
+  const read_from = ["Copilot's Allow all, as its sessions say it"];
+  if (allowAll === "on") {
+    return { read_from, mode: "Allow all", everything: true, note: "Copilot approves every tool, path and URL request without asking.", runs: [] };
+  }
+  return { read_from, mode: "Asks first", note: "Copilot asks before it uses a tool, reaches a path or fetches a URL.", runs: [] };
+}
+
+/** A section of a TOML file, from its `[name]` to the next header. */
+function tomlSection(toml: string, name: string): string {
+  let inside = false;
+  const lines: string[] = [];
+  for (const line of toml.split("\n")) {
+    const header = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line);
+    if (header !== null) {
+      inside = header[1]?.trim() === name;
+      continue;
+    }
+    if (inside) lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+const tomlString = (section: string, key: string): string | undefined =>
+  new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, "m").exec(section)?.[1];
+
+const tomlTrue = (section: string, key: string): boolean => new RegExp(`^\\s*${key}\\s*=\\s*true\\b`, "m").test(section);
+
+/** Grok's own mode, from `[ui]` in its config: `permission_mode`, else the older `approval_mode` and `yolo`. */
+export function grokModeOf(toml: string | undefined): "ask" | "auto" | "always-approve" {
+  const ui = tomlSection(toml ?? "", "ui");
+  const said = tomlString(ui, "permission_mode") ?? tomlString(ui, "approval_mode");
+  if (said === "auto" || said === "always-approve" || said === "ask") return said;
+  return tomlTrue(ui, "yolo") ? "always-approve" : "ask";
+}
+
+const GROK_MODES = {
+  ask: { name: "Ask", note: "Grok asks before anything its rules don't allow." },
+  auto: { name: "Auto", note: "Grok's own check lets safe steps through and asks about risky ones." },
+  "always-approve": { name: "Always-approve", note: "Grok approves every step without asking: only deny rules and hooks stop one." },
+} as const;
+
+/** One of Grok's own rules, `{ action = "allow", tool = "bash", pattern = "git *" }`, as an entry. */
+function grokEntry(tool: string, pattern: string | undefined, raw: string): OwnEntry {
+  const name = clip(tool, LONGEST_NAME);
+  const lower = tool.toLowerCase();
+  if (lower === "bash") {
+    const words = bashWords(pattern);
+    return { kind: "command", name, ...(words === undefined ? {} : { words }), raw: clip(raw, LONGEST_RAW) };
+  }
+  const kind = lower === "read" || lower === "grep" ? "read" : lower === "edit" ? "write" : lower.startsWith("web") ? "web" : "tool";
+  return { kind, name, raw: clip(raw, LONGEST_RAW) };
+}
+
+/** Grok's own rules, from `[permission] rules` in its config, by what each does. */
+export function grokRulesOf(toml: string | undefined): Record<"allow" | "ask" | "deny", OwnEntry[]> {
+  const rules = { allow: [] as OwnEntry[], ask: [] as OwnEntry[], deny: [] as OwnEntry[] };
+  const section = tomlSection(toml ?? "", "permission");
+  for (const table of section.matchAll(/\{([^{}]*)\}/g)) {
+    const body = table[1] ?? "";
+    const field = (key: string) => new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`).exec(body)?.[1];
+    const action = field("action");
+    const tool = field("tool");
+    if ((action === "allow" || action === "ask" || action === "deny") && tool !== undefined) {
+      rules[action].push(grokEntry(tool, field("pattern"), `{${body.trim()}}`));
+    }
+  }
+  return { allow: rules.allow.slice(0, MOST), ask: rules.ask.slice(0, MOST), deny: rules.deny.slice(0, MOST) };
+}
+
+/**
+ * Grok's copy (Chips ADR 0301): its mode and rules from `~/.grok/config.toml`, and the permission
+ * rules it takes from Claude Code's settings files, which it follows too. Read, never written.
+ */
+export function grokOwnRules(options: {
+  readonly configPath: string;
+  readonly config: string | undefined;
+  readonly claude: readonly PlacedLayer[];
+  readonly home?: string | undefined;
+}): OwnRules {
+  const home = options.home ?? homedir();
+  const mode = grokModeOf(options.config);
+  const own = grokRulesOf(options.config);
+  const layers = options.claude.map((each) => each.layer);
+  const borrowed = { allow: joined(layers, "allow"), ask: joined(layers, "ask"), deny: joined(layers, "deny") };
+  const withClaude = borrowed.allow.length + borrowed.ask.length + borrowed.deny.length > 0;
+  const read_from = [tilde(options.configPath, home), ...(withClaude ? options.claude.map((each) => tilde(each.path, home)) : [])].slice(0, MOST_PLACES);
+  const note = [GROK_MODES[mode].note, withClaude ? "It follows your Claude Code permission rules too, as listed here." : undefined]
+    .filter((line): line is string => line !== undefined)
+    .join(" ");
+  if (mode === "always-approve") return { read_from, mode: GROK_MODES[mode].name, everything: true, note, runs: [] };
+  return {
+    read_from,
+    mode: GROK_MODES[mode].name,
+    note,
+    runs: [...own.allow, ...borrowed.allow].slice(0, MOST),
+    asks: [...own.ask, ...borrowed.ask].slice(0, MOST),
+    refuses: [...own.deny, ...borrowed.deny].slice(0, MOST),
+  };
+}
+
+/**
  * Send the copy where the connection takes it: SDK 1.0.10's `settings.ownRules`. An older SDK has
  * no such method and an older Chips refuses it; either way nothing else changes.
  */

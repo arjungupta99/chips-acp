@@ -249,9 +249,9 @@ const KNOWN: readonly Known[] = [
     id: "grok",
     name: "Grok",
     program: "grok",
-    // Grok updates itself in the background unless told not to, which xAI asks of anything that
-    // runs it as an ACP agent: the person's own `grok` in a terminal still keeps itself current.
-    args: ["--no-auto-update", "agent", "stdio"],
+    // Left to update itself as it does: xAI's API refuses a Grok too old (it refused 0.2.99 with
+    // a 426), and a Grok only Chips runs would never be updated otherwise.
+    args: ["agent", "stdio"],
     fetches: false,
     agent: "grok",
     installLine: "curl -fsSL https://x.ai/cli/install.sh | bash",

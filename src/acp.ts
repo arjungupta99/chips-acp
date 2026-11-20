@@ -54,6 +54,23 @@ export interface AuthStatus {
   readonly label?: string | undefined;
 }
 
+/**
+ * What an agent said when it refused, in its own words: JSON-RPC's message, or what its details say
+ * where the message is only "Internal error". Grok puts its API's answer there ("Your Grok CLI version
+ * (0.2.99) is outdated …"), and Goose why it can't run.
+ */
+export function agentWords(error: AcpError): string {
+  const data = error.data;
+  const said =
+    typeof data === "string"
+      ? data
+      : typeof data === "object" && data !== null && typeof (data as { message?: unknown }).message === "string"
+        ? (data as { message: string }).message
+        : undefined;
+  if (said === undefined || said.trim() === "" || !/^internal error$/i.test(error.message.trim())) return error.message;
+  return said.trim().slice(0, 600);
+}
+
 /** The refusal ACP gives a session or a turn while the agent isn't signed in (`authRequired`). */
 export function isAuthRequired(error: unknown): boolean {
   return error instanceof AcpError && error.code === -32000 && /auth/i.test(error.message);

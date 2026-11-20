@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { type Install, makersFolder, readyAdapter, withFetchedAdapter } from "../src/adapter.ts";
 import type { KindConfig } from "../src/bridge.ts";
-import { AcpError } from "../src/acp.ts";
+import { AcpError, agentWords } from "../src/acp.ts";
 import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords } from "../src/kinds.ts";
 import { lookAt } from "../src/models.ts";
-import { modeOwnRules } from "../src/own-rules.ts";
+import { copilotOwnRules, grokModeOf, grokOwnRules, grokRulesOf, modeOwnRules } from "../src/own-rules.ts";
 import { checkCommand, readConfig, SetupError } from "../src/setup.ts";
 
 const root = mkdtempSync(join(tmpdir(), "chips-acp-kinds-"));
@@ -48,7 +48,7 @@ const NATIVE = [
   ],
   ["copilot", "Copilot", ["copilot", "--acp"], "curl -fsSL https://gh.io/copilot-install | bash", ".local/bin"],
   ["antigravity", "Antigravity", ["agy", "acp"], "curl -fsSL https://antigravity.google/cli/install.sh | bash", ".local/bin"],
-  ["grok", "Grok", ["grok", "--no-auto-update", "agent", "stdio"], "curl -fsSL https://x.ai/cli/install.sh | bash", ".grok/bin"],
+  ["grok", "Grok", ["grok", "agent", "stdio"], "curl -fsSL https://x.ai/cli/install.sh | bash", ".grok/bin"],
 ] as const;
 
 describe("an agent that speaks ACP itself", () => {
@@ -229,5 +229,112 @@ describe("an agent's models, as a kind known by name offers them", () => {
     const { catalog } = await lookAt(options, async () => options);
     assert.deepEqual(catalog?.choices.map((choice) => choice.id), ["auto"]);
     assert.equal(catalog?.default.model, "auto");
+  });
+});
+
+describe("an agent's refusal, in its own words", () => {
+  it("is what its details say where JSON-RPC's message is only Internal error", () => {
+    const grok = new AcpError("Internal error", -32603, {
+      message: "API error (status 426 Upgrade Required): Your Grok CLI version (0.2.99) is outdated.",
+      http_status: 426,
+    });
+    assert.equal(agentWords(grok), "API error (status 426 Upgrade Required): Your Grok CLI version (0.2.99) is outdated.");
+    assert.equal(agentWords(new AcpError("Internal error", -32603, "Failed to resolve provider and model")), "Failed to resolve provider and model");
+    // Its own message where it says one, or where the details say nothing.
+    assert.equal(agentWords(new AcpError("Authentication required", -32000, { message: "x" })), "Authentication required");
+    assert.equal(agentWords(new AcpError("Internal error", -32603)), "Internal error");
+  });
+});
+
+describe("Copilot's and Grok's own permissions, on the Permissions page", () => {
+  it("is Copilot's Allow all: asks first while it's off, never asks while it's on", () => {
+    assert.deepEqual(copilotOwnRules("off"), {
+      read_from: ["Copilot's Allow all, as its sessions say it"],
+      mode: "Asks first",
+      note: "Copilot asks before it uses a tool, reaches a path or fetches a URL.",
+      runs: [],
+    });
+    assert.equal(copilotOwnRules(undefined).mode, "Asks first");
+    assert.deepEqual(copilotOwnRules("on"), {
+      read_from: ["Copilot's Allow all, as its sessions say it"],
+      mode: "Allow all",
+      everything: true,
+      note: "Copilot approves every tool, path and URL request without asking.",
+      runs: [],
+    });
+  });
+
+  const CONFIG = [
+    "[cli]",
+    "auto_update = true",
+    "",
+    "[ui]",
+    "yolo = false",
+    'permission_mode = "ask" # or auto',
+    "",
+    "[permission]",
+    "rules = [",
+    '  { action = "allow", tool = "bash", pattern = "git *" },',
+    '  { action = "allow", tool = "read" },',
+    '  { tool = "bash", action = "deny", pattern = "rm -rf *" },',
+    '  { action = "ask", tool = "WebFetch" },',
+    "]",
+    "",
+    "[[marketplace.sources]]",
+    'name = "x"',
+  ].join("\n");
+
+  it("reads Grok's mode from its config, the newest way of saying it first", () => {
+    assert.equal(grokModeOf(CONFIG), "ask");
+    assert.equal(grokModeOf('[ui]\npermission_mode = "auto"'), "auto");
+    assert.equal(grokModeOf("[ui]\nyolo = true"), "always-approve");
+    assert.equal(grokModeOf('[ui]\nyolo = true\npermission_mode = "ask"'), "ask");
+    assert.equal(grokModeOf('[other]\npermission_mode = "auto"'), "ask");
+    assert.equal(grokModeOf(undefined), "ask");
+  });
+
+  it("reads Grok's own rules, whatever order their keys are in", () => {
+    const rules = grokRulesOf(CONFIG);
+    assert.deepEqual(
+      rules.allow.map((entry) => [entry.kind, entry.name, entry.words]),
+      [
+        ["command", "bash", ["git"]],
+        ["read", "read", undefined],
+      ],
+    );
+    assert.deepEqual(rules.deny.map((entry) => [entry.kind, entry.words]), [["command", ["rm", "-rf"]]]);
+    assert.deepEqual(rules.ask.map((entry) => entry.kind), ["web"]);
+  });
+
+  it("joins Grok's own rules with the Claude Code ones it follows, and says where each came from", () => {
+    const home = "/Users/ada";
+    const copy = grokOwnRules({
+      configPath: `${home}/.grok/config.toml`,
+      config: CONFIG,
+      claude: [{ path: `${home}/.claude/settings.local.json`, layer: { permissions: { allow: ["Bash(npm test:*)"], deny: ["Read(./.env)"] } } }],
+      home,
+    });
+    assert.deepEqual(copy.read_from, ["~/.grok/config.toml", "~/.claude/settings.local.json"]);
+    assert.equal(copy.mode, "Ask");
+    assert.equal(copy.note, "Grok asks before anything its rules don't allow. It follows your Claude Code permission rules too, as listed here.");
+    // Grok's own first, then the Claude Code ones, each as written.
+    assert.deepEqual(
+      copy.runs.map((entry) => [entry.name, entry.raw]),
+      [
+        ["bash", '{action = "allow", tool = "bash", pattern = "git *"}'],
+        ["read", '{action = "allow", tool = "read"}'],
+        ["Bash", "Bash(npm test:*)"],
+      ],
+    );
+    assert.deepEqual(copy.refuses?.map((entry) => entry.name), ["bash", "Read"]);
+    // Always-approve lets everything through: nothing to list.
+    const yolo = grokOwnRules({ configPath: `${home}/.grok/config.toml`, config: "[ui]\nyolo = true", claude: [], home });
+    assert.deepEqual(yolo, {
+      read_from: ["~/.grok/config.toml"],
+      mode: "Always-approve",
+      everything: true,
+      note: "Grok approves every step without asking: only deny rules and hooks stop one.",
+      runs: [],
+    });
   });
 });

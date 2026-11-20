@@ -47,6 +47,12 @@ export function currentIn(options: readonly ConfigOption[] | undefined): string 
   return value === undefined || value === "" ? undefined : value;
 }
 
+/** What a session's permission option is at, where its agent has one: Copilot's Allow all (category `permissions`). */
+export function permissionsIn(options: readonly ConfigOption[] | undefined): string | undefined {
+  const value = options?.find((option) => option.category === "permissions")?.currentValue;
+  return value === undefined || value === "" ? undefined : value;
+}
+
 /** A session's options with its mode as the agent now says it, for a `current_mode_update`. */
 export function withCurrent(options: readonly ConfigOption[], mode: string): readonly ConfigOption[] {
   const option = modeOption(options);

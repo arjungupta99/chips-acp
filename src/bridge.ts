@@ -34,7 +34,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -84,6 +84,7 @@ import {
 } from "@chipschat/protocol";
 import {
   AcpClient,
+  agentWords,
   AcpError,
   type AgentInfo,
   type AgentRequest,
@@ -98,8 +99,17 @@ import { readLayer, settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
 import { adapterEnv, codexDocBytes, headlessAuthOf, type KnownId, knownIdOf, knownOf, modesOf, signedOutBy, signedOutWords } from "./kinds.js";
-import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, pickedMode, withCurrent } from "./modes.js";
-import { claudeOwnRules, codexOwnRules, modeOwnRules, type OwnRules, type PlacedLayer, sendOwnRules } from "./own-rules.js";
+import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, permissionsIn, pickedMode, withCurrent } from "./modes.js";
+import {
+  claudeOwnRules,
+  codexOwnRules,
+  copilotOwnRules,
+  grokOwnRules,
+  modeOwnRules,
+  type OwnRules,
+  type PlacedLayer,
+  sendOwnRules,
+} from "./own-rules.js";
 import { VERSION } from "./version.js";
 import {
   type Catalog,
@@ -439,6 +449,8 @@ export class Bridge {
   private readonly modeSaid = new Map<string, string>();
   /** What it runs on its own, to send again in a moment: a mode change moves every session at once. */
   private ownRulesTimer: NodeJS.Timeout | undefined;
+  /** Its sessions' permission option, as the last to say it said: Copilot's Allow all. */
+  private permissionsNow: string | undefined;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -684,6 +696,7 @@ export class Bridge {
         copied = { client, sessionId: forked.sessionId };
         this.process.live.add(forked.sessionId);
         this.sessionOptions.set(forked.sessionId, forked.configOptions);
+        this.permissionsHeard(forked.configOptions);
         await this.moded(client, forked.sessionId);
       }
       record = await this.made(forkName(original.name), {
@@ -1317,6 +1330,7 @@ export class Bridge {
         const loaded = await client.loadSession(kept, record.folder, [], this.sessionMeta(record));
         live.add(kept);
         this.sessionOptions.set(kept, loaded.configOptions);
+        this.permissionsHeard(loaded.configOptions);
         await this.moded(client, kept);
         await this.modelled(client, record, kept);
         return kept;
@@ -1327,6 +1341,7 @@ export class Bridge {
     const made = await client.newSession(record.folder, [], this.sessionMeta(record));
     live.add(made.sessionId);
     this.sessionOptions.set(made.sessionId, made.configOptions);
+    this.permissionsHeard(made.configOptions);
     await this.moded(client, made.sessionId);
     await this.modelled(client, record, made.sessionId);
     state.sessions[key] = made.sessionId;
@@ -1421,6 +1436,14 @@ export class Bridge {
     if (!modesOf(this.options.kind).some((each) => each.id === mode) && mode !== this.options.kind.mode) return;
     if (this.modeNow === mode) return;
     this.modeNow = mode;
+    this.ownRulesSoon();
+  }
+
+  /** A session's permission option, heard: what it runs on its own is sent again when it moved. */
+  private permissionsHeard(options: readonly ConfigOption[] | undefined): void {
+    const now = permissionsIn(options);
+    if (now === undefined || now === this.permissionsNow) return;
+    this.permissionsNow = now;
     this.ownRulesSoon();
   }
 
@@ -1740,10 +1763,15 @@ export class Bridge {
   private ownRulesNow(): OwnRules | undefined {
     if (this.knownKind === "codex") return codexOwnRules(this.runningMode() ?? "workspace-write");
     if (this.knownKind === undefined) {
-      // A kind known by name only says the mode it runs in, where it has one Chips may pick (Chips ADR 0301).
+      // A kind known by name only (Chips ADR 0301): Copilot's Allow all, Grok's config and the
+      // Claude Code rules it follows too, and for the others the mode it runs in, where it has one
+      // Chips may pick.
       const { kind } = this.options;
+      const id = knownOf(kind)?.id;
+      if (id === "copilot") return copilotOwnRules(this.permissionsNow);
+      if (id === "grok") return this.grokOwnRules();
       const running = this.runningMode();
-      if (knownOf(kind) === undefined || running === undefined || modesOf(kind).length === 0) return undefined;
+      if (id === undefined || running === undefined || modesOf(kind).length === 0) return undefined;
       return modeOwnRules(kind.name, running, modesOf(kind).find((mode) => mode.id === running));
     }
     if (this.knownKind !== "claude-code") return undefined;
@@ -1761,6 +1789,32 @@ export class Bridge {
       mode: this.runningMode() ?? "default",
       home: this.places.home,
     });
+  }
+
+  /**
+   * Grok's: its own config, and the Claude Code settings it takes permission rules from: yours, in
+   * `~/.claude`, and each agent folder's `.claude`.
+   */
+  private grokOwnRules(): OwnRules {
+    const { home, claudeHome } = this.places;
+    const configPath = join(home, ".grok", "config.toml");
+    let config: string | undefined;
+    try {
+      config = readFileSync(configPath, "utf8");
+    } catch {
+      config = undefined;
+    }
+    const folders = [...new Set(this.records().map((record) => record.folder))];
+    const paths = [
+      join(claudeHome, "settings.json"),
+      join(claudeHome, "settings.local.json"),
+      ...folders.flatMap((folder) => [join(folder, ".claude", "settings.json"), join(folder, ".claude", "settings.local.json")]),
+    ];
+    const claude = paths.flatMap((path): PlacedLayer[] => {
+      const layer = readLayer(path);
+      return layer === undefined ? [] : [{ path, layer }];
+    });
+    return grokOwnRules({ configPath, config, claude, home });
   }
 
   /** The harness's own set and each agent's files, as they are on disk now. */
@@ -1908,6 +1962,7 @@ export class Bridge {
         const options = configOptionsOf(update);
         if (this.sessionOptions.has(sessionId) && options.length > 0) {
           this.sessionOptions.set(sessionId, options);
+          this.permissionsHeard(options);
           const now = currentIn(options);
           if (now !== undefined) {
             this.modeSaid.set(sessionId, now);
@@ -2203,6 +2258,7 @@ export class Bridge {
     try {
       const made = await client.newSession(kind.folder ?? kind.folders);
       sessionId = made.sessionId;
+      this.permissionsHeard(made.configOptions);
       // The modes it offers (Chips ADR 0300), for what Chips may pick before a room's session opens.
       const offered = offeredIn(made.configOptions);
       if (offered !== undefined && offered.join() !== this.offered?.join()) {
@@ -2461,7 +2517,7 @@ export function settingsFor(kind: KindConfig, bridge: () => Bridge | undefined):
 // ------------------------------------------------------------------ small words
 
 function messageOf(error: unknown): string {
-  if (error instanceof AcpError) return error.message;
+  if (error instanceof AcpError) return agentWords(error);
   return error instanceof Error ? error.message : String(error);
 }
 

@@ -1533,7 +1533,7 @@ describe("an agent that stops", () => {
 describe("an agent that opens no session until asked to sign in (Chips ADR 0301)", () => {
   it("is asked as it starts, by what `grok login` saved, and then answers", async () => {
     const agent = fakeAgent({ signIn: { methods: ["grok.com", "cached_token"] } });
-    const { chips } = await rig({ agent, command: ["grok", "--no-auto-update", "agent", "stdio"] });
+    const { chips } = await rig({ agent, command: ["grok", "agent", "stdio"] });
     await chips.say("Hello");
     await sent(chips, "run.completed");
     assert.deepEqual(agent.authenticated, ["cached_token"]);
@@ -1542,11 +1542,34 @@ describe("an agent that opens no session until asked to sign in (Chips ADR 0301)
 
   it("signed out, is asked nothing and its turn says how to sign in", async () => {
     const agent = fakeAgent({ signIn: { methods: ["grok.com"] } });
-    const { chips } = await rig({ agent, command: ["grok", "--no-auto-update", "agent", "stdio"] });
+    const { chips } = await rig({ agent, command: ["grok", "agent", "stdio"] });
     await chips.say("Hello");
     const failed = await sent(chips, "run.failed");
     assert.match(String(failed.payload["error"]), /isn't signed in on this machine: run `grok login` in a new terminal/);
     assert.deepEqual(agent.authenticated, []);
     assert.deepEqual(agent.made, []);
+  });
+});
+
+describe("Copilot's and Grok's own permissions (Chips ADR 0301)", () => {
+  it("sends Copilot's Allow all as its sessions say it, and again when one says it moved", async () => {
+    const copies: unknown[] = [];
+    const agent = fakeAgent({ allowAll: "off" });
+    const { chips } = await rig({ agent, command: ["copilot", "--acp"], ownRules: copies });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    await until(() => (copies.at(-1) as { mode?: string } | undefined)?.mode === "Asks first");
+    assert.equal((copies.at(-1) as { everything?: boolean }).everything, undefined);
+  });
+
+  it("sends Grok's mode from its config, with the Claude Code rules it follows", async () => {
+    const copies: unknown[] = [];
+    const agent = fakeAgent({ signIn: { methods: ["cached_token"] } });
+    await rig({ agent, command: ["grok", "agent", "stdio"], ownRules: copies });
+    await until(() => copies.length > 0);
+    const copy = copies.at(-1) as { mode?: string; read_from?: string[] };
+    // The test's home has no Grok config: Grok's own default, Ask.
+    assert.equal(copy.mode, "Ask");
+    assert.ok(copy.read_from?.[0]?.endsWith(".grok/config.toml"), JSON.stringify(copy));
   });
 });

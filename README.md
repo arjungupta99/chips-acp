@@ -37,7 +37,7 @@ also looks where that line puts the agent, since a terminal opened before doesn'
 | `copilot` | `copilot --acp` | `curl -fsSL https://gh.io/copilot-install \| bash` | `copilot login` | none |
 | `antigravity` | `agy acp` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy acp --login` | Default, Accept edits, Auto |
 | `goose` | `goose acp` | Goose's `download_cli.sh` | `goose configure` (a model provider and its key) | Approve, Smart approve, Auto |
-| `grok` | `grok --no-auto-update agent stdio` | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `grok login` | none |
+| `grok` | `grok agent stdio` | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `grok login` | none |
 
 - **Cursor** and **Copilot** offer modes that are ways of working (Agent, Plan, Ask; Agent, Plan,
   Autopilot), not how much they may do, so Chips puts them in none: each session asks as the agent's
@@ -49,13 +49,23 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   naming `GOOSE_PROVIDER`, which the bridge says as "Goose has no model provider set up".
 - **Grok** opens no session until it is asked to sign in (`authenticate`), as xAI's own ACP example
   does: by its API key where `XAI_API_KEY` is set, else by what `grok login` saved. Signed out, it
-  offers neither, and its session is refused. Its ACP sessions have no mode to be put in.
+  offers neither, and its session is refused. Its ACP sessions have no mode to be put in. It is left
+  to update itself: xAI's API refuses one too old, and a Grok only Chips runs would never be updated
+  otherwise.
 - **Antigravity**'s Auto is offered only where Antigravity has it: a personal Google account with
   its terminal sandbox on.
 - None of the five copies a session (`session/fork`), so their cards leave Fork off. Cursor, Copilot,
   Goose and Grok offer their models as a session's `model` option, where they do, and the bridge
-  offers them in Chips as it does Claude Code's and Codex's. Their files and own settings aren't
-  read: the Permissions page shows the mode a session runs in, where Chips may pick one.
+  offers them in Chips as it does Claude Code's and Codex's, each once (Copilot on GitHub's free plan
+  lists Auto twice). Their files aren't read.
+- The Permissions page shows what each one's own settings let through, read and never written:
+  Copilot's Allow all, as its sessions say it (off: it asks before a tool, a path or a URL; on: it
+  never asks); Grok's mode and rules from `~/.grok/config.toml` (`[ui] permission_mode`, or the older
+  `yolo`; `[permission] rules`) together with the permission rules it takes from Claude Code's
+  settings, yours in `~/.claude` and each agent folder's; and for Antigravity and Goose the mode a
+  session runs in. Cursor's own settings aren't read yet.
+- An agent's refusal reaches the room in its own words: where JSON-RPC's message is only "Internal
+  error", what its details say, as Grok's API answer ("Your Grok CLI version (0.2.99) is outdated …").
 - What signs one in from the environment is carried to the copy kept running: `CURSOR_API_KEY`,
   `COPILOT_GITHUB_TOKEN` (not `GH_TOKEN` or `GITHUB_TOKEN`, which are the gh command's too and
   would beat Copilot's saved sign-in), `GEMINI_API_KEY`, `XAI_API_KEY`, and Goose's

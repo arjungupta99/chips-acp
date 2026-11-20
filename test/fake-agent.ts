@@ -134,6 +134,8 @@ export function fakeAgent(
      * Grok's; `refuse` says no to every one.
      */
     signIn?: { readonly methods: readonly string[]; readonly refuse?: boolean };
+    /** Its sessions' Allow all, as Copilot's: an option of category `permissions`. */
+    allowAll?: "on" | "off";
     refusesSessions?: boolean;
     compaction?: "claude" | "codex";
     model?: string;
@@ -203,8 +205,26 @@ export function fakeAgent(
         ];
       };
       /** A session's options, as an answer carries them: none without `models` or `modes`. */
+      const allowAll =
+        options.allowAll === undefined
+          ? []
+          : [
+              {
+                id: "allow_all",
+                name: "Allow All",
+                category: "permissions",
+                type: "select",
+                currentValue: options.allowAll,
+                options: [
+                  { value: "on", name: "On" },
+                  { value: "off", name: "Off" },
+                ],
+              },
+            ];
       const configOptions = (sessionId: string): Message => {
-        if (models === undefined) return modes === undefined ? {} : { configOptions: modeOption(sessionId) };
+        if (models === undefined) {
+          return modes === undefined && allowAll.length === 0 ? {} : { configOptions: [...modeOption(sessionId), ...allowAll] };
+        }
         const now = on.get(sessionId) ?? { model: models.current, effort: models.effort };
         on.set(sessionId, now);
         const listed = models.choices.map((choice) => ({ value: choice.id, name: choice.name }));
@@ -230,6 +250,7 @@ export function fakeAgent(
                     ],
                   },
                 ]),
+            ...allowAll,
           ],
         };
       };
