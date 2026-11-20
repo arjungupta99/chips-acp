@@ -12,6 +12,7 @@ import { type Install, makersFolder, readyAdapter, withFetchedAdapter } from "..
 import type { KindConfig } from "../src/bridge.ts";
 import { AcpError } from "../src/acp.ts";
 import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords } from "../src/kinds.ts";
+import { lookAt } from "../src/models.ts";
 import { modeOwnRules } from "../src/own-rules.ts";
 import { checkCommand, readConfig, SetupError } from "../src/setup.ts";
 
@@ -208,5 +209,25 @@ describe("an agent with nothing to run on", () => {
       copy: "goose configure",
     });
     assert.equal(signedOutStop(kindOf("cursor")).copy, "cursor-agent login");
+  });
+});
+
+describe("an agent's models, as a kind known by name offers them", () => {
+  it("names each once, though Copilot on GitHub's free plan lists Auto twice", async () => {
+    const options = [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        currentValue: "auto",
+        options: [
+          { value: "auto", name: "Auto" },
+          { value: "auto", name: "Auto" },
+        ],
+      },
+    ];
+    const { catalog } = await lookAt(options, async () => options);
+    assert.deepEqual(catalog?.choices.map((choice) => choice.id), ["auto"]);
+    assert.equal(catalog?.default.model, "auto");
   });
 });

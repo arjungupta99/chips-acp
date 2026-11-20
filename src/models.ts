@@ -91,9 +91,12 @@ export async function lookAt(
   const model = modelOption(options);
   const fallback = pickOf(options);
   if (model === undefined || fallback === undefined) return { refused: [] };
-  const listed = model.options.some((each) => each.value === fallback.model)
+  const named = model.options.some((each) => each.value === fallback.model)
     ? model.options
     : [{ value: fallback.model, name: fallback.model }, ...model.options];
+  // Each model once: Copilot on GitHub's free plan lists Auto twice, and Chips takes no list that
+  // names one twice.
+  const listed = named.filter((each, at) => named.findIndex((other) => other.value === each.value) === at);
   // Forty at most, the default always among them.
   let others = MODEL_CHOICES_MAX - 1;
   const offered = listed.filter((each) => each.value === fallback.model || others-- > 0);
