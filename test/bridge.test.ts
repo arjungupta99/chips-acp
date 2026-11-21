@@ -963,6 +963,28 @@ describe("what it asks", () => {
     assert.equal(questionFor("Fetch the page", undefined), "Allow it to fetch the page?");
   });
 
+  it("words Antigravity's asks as sentences: its toolSummary, a bare command, a File title", () => {
+    // Its run_command: the title is the command, its own words are toolSummary.
+    assert.equal(
+      questionFor("uname -s", { CommandLine: "uname -s", WaitMsBeforeAsync: 5000, toolSummary: "Get OS kernel name" }, {
+        tool: "run_command",
+        kind: "execute",
+      }),
+      "Get OS kernel name? `uname -s`",
+    );
+    // A bare command with no words of its own, or one in backticks, is run.
+    assert.equal(questionFor("uname -s", { CommandLine: "uname -s" }, { kind: "execute" }), "Allow it to run `uname -s`?");
+    assert.equal(questionFor("`npm test`", { command: "npm test" }), "Allow it to run `npm test`?");
+    // Its file tools title a call "File <path>": the verb from the tool's name, else its kind.
+    assert.equal(
+      questionFor("File agent/room/hello.txt", { Content: "hi", Path: "/x/agent/room/hello.txt" }, { tool: "write_file", kind: "edit" }),
+      "Allow it to write agent/room/hello.txt?",
+    );
+    assert.equal(questionFor("File notes.md", {}, { kind: "read" }), "Allow it to read notes.md?");
+    // With neither, the title is left as it was.
+    assert.equal(questionFor("File notes.md", {}), "Allow it to file notes.md?");
+  });
+
   it("cuts a long command short inside its span, and keeps every question to 200 characters", () => {
     const long = `grep -n ${"x".repeat(400)} game.js`;
     const question = questionFor(long, { command: long, description: "Look for the long word" });

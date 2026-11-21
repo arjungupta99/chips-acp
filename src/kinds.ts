@@ -119,13 +119,18 @@ const CODEX_MODES: readonly KindMode[] = [
 
 /**
  * Antigravity's, as `agy acp` offers them. Plan is left out, as Claude Code's is. Auto is offered
- * only where Antigravity has it: a personal Google account with its terminal sandbox on. It has no
- * mode that never asks.
+ * only where Antigravity has it: a personal Google account with its terminal sandbox on. Auto runs
+ * every command in that sandbox without asking, an `rm` in its folder included, and checks only
+ * those that leave it. It has no mode that never asks.
  */
 const ANTIGRAVITY_MODES: readonly KindMode[] = [
   { id: "default", name: "Default", words: "Asks before edits and commands its settings don't allow." },
   { id: "accept-edits", name: "Accept edits", words: "Edits files in its folder without asking. Commands still ask." },
-  { id: "auto", name: "Auto", words: "Edits files and runs safe commands without asking. Asks before anything it can't undo." },
+  {
+    id: "auto",
+    name: "Auto",
+    words: "Edits files and runs commands in its sandbox without asking. Asks before a command outside it that it can't undo.",
+  },
 ];
 
 /**

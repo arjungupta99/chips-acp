@@ -2494,7 +2494,10 @@ export class Bridge {
     const input = call["rawInput"];
     const asked = turn.run.approval({
       action: { kind: `acp.${slugOf(kind)}`, input: input ?? {} },
-      question: questionFor(title, input),
+      question: questionFor(title, input, {
+        ...(typeof call["name"] === "string" ? { tool: call["name"] } : {}),
+        ...(typeof call["kind"] === "string" ? { kind: call["kind"] } : {}),
+      }),
       lasts: "once",
       risk: riskOf(kind),
       ...(input === undefined
@@ -2691,20 +2694,39 @@ const QUESTION_MAX = 200;
 
 /**
  * An approval's question. Where the agent says what the call does in its own words (Claude Code's
- * `description`), those words are the question and its command follows in a `code` span, which
- * Chips draws in mono: "Syntax-check game.js? `node --check game.js`". Else "Allow it to" and the
- * call's title. A command too long for what is left is cut short; the preview holds all of it.
+ * `description`, Antigravity's `toolSummary`), those words are the question and its command
+ * follows in a `code` span, which Chips draws in mono: "Syntax-check game.js? `node --check
+ * game.js`". Else "Allow it to" and the call's title. A command too long for what is left is cut
+ * short; the preview holds all of it.
+ *
+ * Two titles aren't the start of a sentence, and are said as one: a bare command ("uname -s", as
+ * Antigravity titles one) is "Allow it to run `uname -s`?", and "File <path>" (Antigravity's for
+ * its file tools) takes its verb from the tool's name (`write_file`), else from the call's kind.
  */
-export function questionFor(title: string, input: unknown): string {
+export function questionFor(title: string, input: unknown, call: { tool?: string; kind?: string } = {}): string {
   const fields = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {};
-  const said = oneLine(fields["description"])?.replace(/[\s.?!:;,]+$/, "");
-  if (said === undefined || said === "") return `Allow it to ${lowerFirst(title)}?`.slice(0, QUESTION_MAX);
+  const said = (oneLine(fields["description"]) ?? oneLine(fields["toolSummary"]))?.replace(/[\s.?!:;,]+$/, "");
+  const given = fields["command"] ?? fields["CommandLine"];
+  const command = oneLine(Array.isArray(given) ? given.join(" ") : given);
+  if (said === undefined || said === "") return `Allow it to ${titleSaid(title, command, call)}?`.slice(0, QUESTION_MAX);
   const asked = `${clip(said, QUESTION_MAX - 1)}?`;
-  const command = oneLine(Array.isArray(fields["command"]) ? fields["command"].join(" ") : fields["command"]);
   // A command with a backtick of its own can't sit in a span.
   const room = QUESTION_MAX - asked.length - 3;
   if (command === undefined || command.includes("`") || room < 12) return asked;
   return `${asked} \`${clip(command, room)}\``;
+}
+
+/** The verb for a file tool's call, by its kind, where its name doesn't give one. */
+const FILE_VERBS: Readonly<Record<string, string>> = { read: "read", edit: "edit", delete: "delete", move: "move" };
+
+/** A call's title as the rest of "Allow it to …". */
+function titleSaid(title: string, command: string | undefined, call: { tool?: string; kind?: string }): string {
+  const bare = title.replace(/^`(.*)`$/s, "$1").trim();
+  if (command !== undefined && bare === command && !command.includes("`")) return `run \`${command}\``;
+  const file = /^File\s+(\S.*)$/s.exec(title);
+  const verb = /^([a-z]+)_file$/.exec(call.tool ?? "")?.[1] ?? FILE_VERBS[call.kind ?? ""];
+  if (file !== null && verb !== undefined) return `${verb} ${file[1]}`;
+  return lowerFirst(title);
 }
 
 /** A string on one line, where it is one and isn't blank. */
