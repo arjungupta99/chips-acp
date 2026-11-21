@@ -98,18 +98,34 @@ import {
 import { readLayer, settingsLayers } from "./claude-settings.js";
 import { ContextFiles, type Places, placesOf } from "./context.js";
 import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
-import { adapterEnv, codexDocBytes, headlessAuthOf, type KnownId, knownIdOf, knownOf, modesOf, signedOutBy, signedOutWords } from "./kinds.js";
+import {
+  adapterEnv,
+  codexDocBytes,
+  headlessAuthOf,
+  type KnownId,
+  knownIdOf,
+  knownOf,
+  modesOf,
+  signedOutBy,
+  signedOutWords,
+  stoppedWith,
+} from "./kinds.js";
 import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, permissionsIn, pickedMode, withCurrent } from "./modes.js";
 import {
+  antigravityOwnRules,
   claudeOwnRules,
   codexOwnRules,
   copilotOwnRules,
+  cursorOwnRules,
+  gooseOwnRules,
   grokOwnRules,
   modeOwnRules,
+  type CopilotSaved,
   type OwnRules,
   type PlacedLayer,
   sendOwnRules,
 } from "./own-rules.js";
+
 import { VERSION } from "./version.js";
 import {
   type Catalog,
@@ -135,6 +151,15 @@ import {
   pastLimit,
   windowCopy,
 } from "./windows.js";
+
+/** A file's text, or nothing where it can't be read. */
+function readText(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
 
 /** The kind of agent this harness is, and how to run it. */
 export interface KindConfig {
@@ -1517,6 +1542,13 @@ export class Bridge {
       await run.fail({ error: `${room.record.name} refused.` });
       return;
     }
+    // A reply in place of an answer while its account can't be used: said as what to do.
+    const stopped = stoppedWith(this.options.kind, turn.reply);
+    if (stopped !== undefined) {
+      this.log(`${room.record.name} couldn't answer: ${stopped}`);
+      await run.fail({ error: stopped, retryable: true });
+      return;
+    }
     // Its last words; when it ended on a tool call, the words before it.
     const answer = instead ?? (turn.reply.trim() || (turn.said.at(-1) ?? ""));
     const { change, note } = await this.sendProject(room, turn, answer);
@@ -1763,16 +1795,26 @@ export class Bridge {
   private ownRulesNow(): OwnRules | undefined {
     if (this.knownKind === "codex") return codexOwnRules(this.runningMode() ?? "workspace-write");
     if (this.knownKind === undefined) {
-      // A kind known by name only (Chips ADR 0301): Copilot's Allow all, Grok's config and the
-      // Claude Code rules it follows too, and for the others the mode it runs in, where it has one
-      // Chips may pick.
+      // A kind known by name only (Chips ADR 0301): each one's own settings, as Claude Code's are
+      // read, and the mode Chips puts its sessions in where it has one Chips may pick.
       const { kind } = this.options;
       const id = knownOf(kind)?.id;
-      if (id === "copilot") return copilotOwnRules(this.permissionsNow);
+      if (id === "copilot") return copilotOwnRules(this.permissionsNow, this.copilotSaved());
       if (id === "grok") return this.grokOwnRules();
+      if (id === "cursor") return this.cursorOwnRules();
       const running = this.runningMode();
       if (id === undefined || running === undefined || modesOf(kind).length === 0) return undefined;
-      return modeOwnRules(kind.name, running, modesOf(kind).find((mode) => mode.id === running));
+      const mode = modesOf(kind).find((each) => each.id === running);
+      const { home } = this.places;
+      if (id === "antigravity") {
+        const settingsPath = join(home, ".gemini", "antigravity-cli", "settings.json");
+        return antigravityOwnRules({ settingsPath, settings: readLayer(settingsPath), running, mode, home });
+      }
+      if (id === "goose") {
+        const permissionPath = join(this.gooseConfigDir(), "permission.yaml");
+        return gooseOwnRules({ permissionPath, yaml: readText(permissionPath), running, mode, home });
+      }
+      return modeOwnRules(kind.name, running, mode);
     }
     if (this.knownKind !== "claude-code") return undefined;
     const userPath = join(this.places.claudeHome, "settings.json");
@@ -1789,6 +1831,44 @@ export class Bridge {
       mode: this.runningMode() ?? "default",
       home: this.places.home,
     });
+  }
+
+  /**
+   * Copilot's: what it saved on disk, its yeses by folder in `permissions-config.json` and its URL
+   * rules in `settings.json`, both in `COPILOT_HOME` (`~/.copilot`).
+   */
+  private copilotSaved(): CopilotSaved {
+    const { home } = this.places;
+    const root = this.env["COPILOT_HOME"] || join(home, ".copilot");
+    const configPath = join(root, "permissions-config.json");
+    const settingsPath = join(root, "settings.json");
+    return {
+      configPath,
+      config: readLayer(configPath) ?? readLayer(join(root, "permissions-config")),
+      settingsPath,
+      settings: readLayer(settingsPath),
+      folders: [...new Set(this.records().map((record) => record.folder))],
+      home,
+    };
+  }
+
+  /** Cursor's: its own config, and each agent folder's `.cursor/cli.json`. */
+  private cursorOwnRules(): OwnRules {
+    const { home } = this.places;
+    const configPath = join(home, ".cursor", "cli-config.json");
+    const folders = [...new Set(this.records().map((record) => record.folder))].flatMap((folder): PlacedLayer[] => {
+      const path = join(folder, ".cursor", "cli.json");
+      const layer = readLayer(path);
+      return layer === undefined ? [] : [{ path, layer }];
+    });
+    return cursorOwnRules({ configPath, config: readLayer(configPath), folders, home });
+  }
+
+  /** Goose's config folder: `GOOSE_PATH_ROOT`'s, else `~/.config/goose` (or `XDG_CONFIG_HOME`'s). */
+  private gooseConfigDir(): string {
+    const root = this.env["GOOSE_PATH_ROOT"];
+    if (root) return join(root, "config");
+    return join(this.env["XDG_CONFIG_HOME"] || join(this.places.home, ".config"), "goose");
   }
 
   /**

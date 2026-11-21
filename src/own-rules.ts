@@ -236,17 +236,88 @@ export function modeOwnRules(name: string, running: string, mode: KindMode | und
   return { read_from, mode: mode.name, ...(mode.everything === true ? { everything: true } : {}), note: mode.words, runs: [] };
 }
 
+/** What Copilot keeps on disk beside its Allow all: the yeses it saved per folder, and its URL rules. */
+export interface CopilotSaved {
+  /** `permissions-config.json`, where Copilot saves each "don't ask again" by the folder it ran in. */
+  readonly configPath: string;
+  readonly config: Layer | undefined;
+  /** `settings.json`, whose `allowedUrls` and `deniedUrls` hold for every folder. */
+  readonly settingsPath: string;
+  readonly settings: Layer | undefined;
+  /** The agents' folders: Copilot saves a yes under the folder a session ran in. */
+  readonly folders: readonly string[];
+  readonly home?: string | undefined;
+}
+
+/** One of Copilot's saved yeses (`tool_approvals[]`) as entries: one per command it names. */
+function copilotEntries(approval: unknown): OwnEntry[] {
+  if (!isRecord(approval) || typeof approval["kind"] !== "string") return [];
+  const kind = approval["kind"];
+  if (kind === "commands") {
+    const said = approval["commandIdentifiers"];
+    return (Array.isArray(said) ? said : [])
+      .filter((each): each is string => typeof each === "string" && each.trim() !== "")
+      .map((each) => {
+        const words = bashWords(each.trim());
+        return { kind: "command" as const, name: "shell", ...(words === undefined ? {} : { words }), raw: clip(each.trim(), LONGEST_RAW) };
+      });
+  }
+  if (kind === "read" || kind === "write") return [{ kind, name: kind, raw: kind }];
+  if (kind === "mcp") {
+    const server = typeof approval["serverName"] === "string" ? approval["serverName"] : "";
+    const tool = typeof approval["toolName"] === "string" ? approval["toolName"] : "*";
+    return server === "" ? [] : [{ kind: "tool", name: clip(`${server}(${tool})`, LONGEST_NAME), raw: clip(`${server}(${tool})`, LONGEST_RAW) }];
+  }
+  const tool = typeof approval["toolName"] === "string" ? approval["toolName"] : typeof approval["extensionName"] === "string" ? approval["extensionName"] : undefined;
+  const label = tool === undefined ? kind : `${kind}(${tool})`;
+  return [{ kind: "tool", name: clip(label, LONGEST_NAME), raw: clip(label, LONGEST_RAW) }];
+}
+
+/** URL rules from Copilot's settings, as entries. */
+function urlEntries(said: unknown): OwnEntry[] {
+  return (Array.isArray(said) ? said : [])
+    .filter((each): each is string => typeof each === "string" && each.trim() !== "")
+    .map((each) => ({ kind: "web" as const, name: "url", raw: clip(each.trim(), LONGEST_RAW) }));
+}
+
+/** Entries once each, by what they say, two hundred at most. */
+function once(entries: readonly OwnEntry[]): OwnEntry[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    const key = `${entry.kind} ${entry.name} ${entry.raw ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, MOST);
+}
+
 /**
  * Copilot's copy (Chips ADR 0301): its Allow all, as each session it opens says it (the option of
- * category `permissions`). Copilot keeps no rules on disk: what it lets through beside that is a yes
- * given in a session, for that session.
+ * category `permissions`), and what it keeps on disk: each "don't ask again" it saved for one of
+ * the agents' folders (`~/.copilot/permissions-config.json`), and the URLs its settings always
+ * allow or deny. Read, never written.
  */
-export function copilotOwnRules(allowAll: string | undefined): OwnRules {
-  const read_from = ["Copilot's Allow all, as its sessions say it"];
+export function copilotOwnRules(allowAll: string | undefined, saved?: CopilotSaved): OwnRules {
+  const home = saved?.home ?? homedir();
+  const files = saved === undefined ? [] : [saved.config === undefined ? undefined : saved.configPath, saved.settings === undefined ? undefined : saved.settingsPath];
+  const read_from = ["Copilot's Allow all, as its sessions say it", ...files.filter((path): path is string => path !== undefined).map((path) => tilde(path, home))];
   if (allowAll === "on") {
     return { read_from, mode: "Allow all", everything: true, note: "Copilot approves every tool, path and URL request without asking.", runs: [] };
   }
-  return { read_from, mode: "Asks first", note: "Copilot asks before it uses a tool, reaches a path or fetches a URL.", runs: [] };
+  const locations = isRecord(saved?.config?.["locations"]) ? (saved?.config?.["locations"] as Layer) : {};
+  const folders = saved?.folders ?? [];
+  const approvals = Object.entries(locations)
+    .filter(([place]) => folders.some((folder) => folder === place || folder.startsWith(`${place}/`)))
+    .flatMap(([, held]) => (isRecord(held) && Array.isArray(held["tool_approvals"]) ? held["tool_approvals"] : []));
+  const runs = once([...approvals.flatMap(copilotEntries), ...urlEntries(saved?.settings?.["allowedUrls"])]);
+  const refuses = once(urlEntries(saved?.settings?.["deniedUrls"]));
+  const note = [
+    "Copilot asks before it uses a tool, reaches a path or fetches a URL.",
+    runs.length > 0 ? "It runs on its own what it was told to keep allowing in these agents' folders." : undefined,
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join(" ");
+  return { read_from, mode: "Asks first", note, runs, ...(refuses.length > 0 ? { refuses } : {}) };
 }
 
 /** A section of a TOML file, from its `[name]` to the next header. */
@@ -390,6 +461,219 @@ export function grokOwnRules(options: {
     runs: [...allowed, ...edits].slice(0, MOST),
     asks: [...own.ask, ...borrowed.ask].slice(0, MOST),
     refuses: [...own.deny, ...borrowed.deny].slice(0, MOST),
+  };
+}
+
+/** A rule written `action(target)`, as Antigravity and Cursor write theirs: its action and target. */
+function actionRule(rule: string): { readonly action: string; readonly target?: string } | undefined {
+  const said = /^\s*([^()\s]+)\s*(?:\((.*)\))?\s*$/s.exec(rule);
+  const action = said?.[1];
+  if (action === undefined) return undefined;
+  const target = said?.[2]?.trim();
+  return target === undefined || target === "" ? { action } : { action, target };
+}
+
+/** A list of rules, each once, as entries. */
+function ruleList(rules: unknown, entry: (rule: string) => OwnEntry | undefined): OwnEntry[] {
+  if (!Array.isArray(rules)) return [];
+  const seen = new Set<string>();
+  const entries: OwnEntry[] = [];
+  for (const rule of rules) {
+    if (typeof rule !== "string" || rule.trim() === "" || seen.has(rule.trim())) continue;
+    seen.add(rule.trim());
+    const made = entry(rule.trim());
+    if (made !== undefined) entries.push(made);
+  }
+  return entries.slice(0, MOST);
+}
+
+/** One of Antigravity's rules, `command(git)`, `write_file(src/)`, `read_url(google.com)`, as an entry. */
+export function antigravityEntry(rule: string): OwnEntry | undefined {
+  const parts = actionRule(rule);
+  if (parts === undefined) return undefined;
+  const name = clip(parts.action, LONGEST_NAME);
+  const raw = clip(rule, LONGEST_RAW);
+  switch (parts.action) {
+    case "command":
+    case "unsandboxed": {
+      const words = parts.target?.startsWith("regex:") === true ? undefined : bashWords(parts.target);
+      return { kind: "command", name, ...(words === undefined ? {} : { words }), raw };
+    }
+    case "read_file":
+      return { kind: "read", name, raw };
+    case "write_file":
+      return { kind: "write", name, raw };
+    case "read_url":
+    case "execute_url":
+      return { kind: "web", name, raw };
+    default:
+      return { kind: "tool", name, raw };
+  }
+}
+
+/** Antigravity's `toolPermission`, where it says more than its mode does. */
+const ANTIGRAVITY_TOOL_PERMISSION: Readonly<Record<string, string>> = {
+  strict: "Its tool permission is Strict: it asks before every command, whatever the mode.",
+  "proceed-in-sandbox": "Its tool permission is Proceed in sandbox: it runs commands in its sandbox without asking, and asks before any outside it.",
+};
+
+/**
+ * Antigravity's copy (Chips ADR 0301): the mode Chips starts each session in, and its own rules,
+ * `permissions` in `~/.gemini/antigravity-cli/settings.json` (deny over ask over allow), with its
+ * `toolPermission` where that says more. Its project and shared scopes aren't files the bridge can
+ * read, so they aren't listed. Read, never written.
+ */
+export function antigravityOwnRules(options: {
+  readonly settingsPath: string;
+  readonly settings: Layer | undefined;
+  readonly running: string;
+  readonly mode: KindMode | undefined;
+  readonly home?: string | undefined;
+}): OwnRules {
+  const home = options.home ?? homedir();
+  const read_from = ["the mode Chips starts each Antigravity session in", tilde(options.settingsPath, home)];
+  const tool = options.settings?.["toolPermission"];
+  const name = options.mode?.name ?? options.running;
+  if (tool === "always-proceed" || options.mode?.everything === true) {
+    const note = tool === "always-proceed" ? "Its tool permission is Always proceed: it approves every step without asking." : options.mode?.words;
+    return { read_from, mode: name, everything: true, ...(note === undefined ? {} : { note }), runs: [] };
+  }
+  const permissions = options.settings?.["permissions"];
+  const lists = isRecord(permissions) ? permissions : {};
+  const note = [options.mode?.words, typeof tool === "string" ? ANTIGRAVITY_TOOL_PERMISSION[tool] : undefined]
+    .filter((line): line is string => line !== undefined)
+    .join(" ");
+  return {
+    read_from,
+    mode: name,
+    ...(note === "" ? {} : { note }),
+    runs: ruleList(lists["allow"], antigravityEntry),
+    asks: ruleList(lists["ask"], antigravityEntry),
+    refuses: ruleList(lists["deny"], antigravityEntry),
+  };
+}
+
+/** Goose's own lists, `user` in its `permission.yaml`: each tool it always allows, asks before, never allows. */
+export function goosePermissionsOf(yaml: string | undefined): Record<"always_allow" | "ask_before" | "never_allow", string[]> {
+  const lists = { always_allow: [] as string[], ask_before: [] as string[], never_allow: [] as string[] };
+  let section: string | undefined;
+  let list: keyof typeof lists | undefined;
+  const unquoted = (text: string) => text.trim().replace(/^(['"])(.*)\1$/, "$2");
+  for (const line of (yaml ?? "").split("\n")) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    const top = /^([A-Za-z_][\w-]*):\s*(?:#.*)?$/.exec(line);
+    if (top !== null) {
+      section = top[1];
+      list = undefined;
+      continue;
+    }
+    if (section !== "user") continue;
+    const key = /^\s+(always_allow|ask_before|never_allow):\s*(.*)$/.exec(line);
+    if (key !== null) {
+      list = key[1] as keyof typeof lists;
+      const inline = /^\[(.*)\]\s*(?:#.*)?$/.exec(key[2]?.trim() ?? "");
+      if (inline !== null) {
+        for (const each of (inline[1] ?? "").split(",")) if (unquoted(each) !== "") lists[list].push(unquoted(each));
+        list = undefined;
+      }
+      continue;
+    }
+    const item = /^\s*-\s*(.+?)\s*(?:#.*)?$/.exec(line);
+    if (item !== null && list !== undefined && unquoted(item[1] ?? "") !== "") lists[list].push(unquoted(item[1] ?? ""));
+  }
+  return lists;
+}
+
+/** One of Goose's tools, `developer__shell`, as an entry: its shell is any command. */
+function gooseEntry(tool: string): OwnEntry {
+  const name = clip(tool, LONGEST_NAME);
+  return /(^|__)shell$/.test(tool) ? { kind: "command", name, raw: name } : { kind: "tool", name, raw: name };
+}
+
+/**
+ * Goose's copy (Chips ADR 0301): the mode Chips starts each session in, and its own lists, `user`
+ * in `permission.yaml` in its config folder: the tools it always allows, asks before, and never
+ * allows. Read, never written.
+ */
+export function gooseOwnRules(options: {
+  readonly permissionPath: string;
+  readonly yaml: string | undefined;
+  readonly running: string;
+  readonly mode: KindMode | undefined;
+  readonly home?: string | undefined;
+}): OwnRules {
+  const home = options.home ?? homedir();
+  const read_from = ["the mode Chips starts each Goose session in", tilde(options.permissionPath, home)];
+  const name = options.mode?.name ?? options.running;
+  const note = options.mode?.words;
+  if (options.mode?.everything === true) return { read_from, mode: name, everything: true, ...(note === undefined ? {} : { note }), runs: [] };
+  const lists = goosePermissionsOf(options.yaml);
+  return {
+    read_from,
+    mode: name,
+    ...(note === undefined ? {} : { note }),
+    runs: once(lists.always_allow.map(gooseEntry)),
+    asks: once(lists.ask_before.map(gooseEntry)),
+    refuses: once(lists.never_allow.map(gooseEntry)),
+  };
+}
+
+/** One of Cursor's rules, `Shell(git)`, `Read(src/**)`, `WebFetch(docs.github.com)`, as an entry. */
+export function cursorEntry(rule: string): OwnEntry | undefined {
+  const parts = actionRule(rule);
+  if (parts === undefined) return undefined;
+  const name = clip(parts.action, LONGEST_NAME);
+  const raw = clip(rule, LONGEST_RAW);
+  switch (parts.action) {
+    case "Shell": {
+      const words = bashWords(parts.target);
+      return { kind: "command", name, ...(words === undefined ? {} : { words }), raw };
+    }
+    case "Read":
+      return { kind: "read", name, raw };
+    case "Write":
+      return { kind: "write", name, raw };
+    case "WebFetch":
+      return { kind: "web", name, raw };
+    default:
+      return { kind: "tool", name, raw };
+  }
+}
+
+const CURSOR_MODES: Readonly<Record<string, { readonly name: string; readonly note: string; readonly everything?: true }>> = {
+  allowlist: { name: "Allowlist", note: "Cursor runs what its allow list allows, and asks before the rest." },
+  "auto-review": {
+    name: "Auto-review",
+    note: "Cursor runs what its allow list allows, runs other commands in its sandbox where it can, and its own check decides the rest.",
+  },
+  unrestricted: { name: "Run everything", note: "Cursor runs every step without asking.", everything: true },
+};
+
+/**
+ * Cursor's copy (Chips ADR 0301): its `approvalMode` and `permissions` in `~/.cursor/cli-config.json`,
+ * with each agent folder's `.cursor/cli.json` rules beside them (deny over allow). Read, never
+ * written.
+ */
+export function cursorOwnRules(options: {
+  readonly configPath: string;
+  readonly config: Layer | undefined;
+  readonly folders: readonly PlacedLayer[];
+  readonly home?: string | undefined;
+}): OwnRules {
+  const home = options.home ?? homedir();
+  const read_from = [tilde(options.configPath, home), ...options.folders.map((each) => tilde(each.path, home))].slice(0, MOST_PLACES);
+  const said = options.config?.["approvalMode"];
+  const mode = typeof said === "string" ? CURSOR_MODES[said] : undefined;
+  if (mode?.everything === true) return { read_from, mode: mode.name, everything: true, note: mode.note, runs: [] };
+  const layers = [...(options.config === undefined ? [] : [options.config]), ...options.folders.map((each) => each.layer)];
+  const listed = (key: "allow" | "deny") =>
+    once(layers.flatMap((layer) => ruleList(isRecord(layer["permissions"]) ? (layer["permissions"] as Layer)[key] : undefined, cursorEntry)));
+  return {
+    read_from,
+    mode: mode?.name ?? "Cursor's own",
+    note: mode?.note ?? "Cursor asks as its own Run Mode says: Auto-review, Allowlist or Run everything.",
+    runs: listed("allow"),
+    refuses: listed("deny"),
   };
 }
 

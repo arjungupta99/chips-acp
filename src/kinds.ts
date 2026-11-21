@@ -66,6 +66,12 @@ interface Known {
   readonly unready?: RegExp;
   /** What it lacks when it can't run, where that isn't a sign-in: Goose's model provider. */
   readonly lacks?: { readonly detail: string; readonly says: string };
+  /**
+   * A reply it gives in place of an answer when its account can't be used, and what Chips says
+   * instead, as a failed turn: Antigravity answers "⚠ Verification Required" while Google wants
+   * the account verified, and says nothing of where.
+   */
+  readonly stops?: { readonly reply: RegExp; readonly says: string };
 }
 
 const SIGN_IN_DOING = "Run this in Terminal, then try again. Your browser opens to sign in.";
@@ -244,6 +250,11 @@ const KNOWN: readonly Known[] = [
     signInLine: "agy acp --login",
     signInDoing: "Run this in Terminal, then try again. It gives you a Google sign-in link; paste back the code you get.",
     keys: ["GEMINI_API_KEY"],
+    stops: {
+      reply: /^[\s⚠\uFE0F]*Verification Required[\s.!]*$/i,
+      says:
+        "Google wants this Antigravity account verified before it answers. Run `agy -p hi` in a new terminal: it prints a link to verify the account in your browser. Then send this again.",
+    },
   },
   {
     id: "grok",
@@ -288,6 +299,12 @@ const knownBy = (kind: KindConfig) => {
 
 /** Whether a known kind is an agent that speaks ACP itself, with no adapter to install or fetch. */
 export const speaksAcp = (known: Pick<Known, "adapter">): boolean => known.adapter === undefined;
+
+/** What Chips says in place of a reply the kind gives when its account can't be used; nothing for any other. */
+export function stoppedWith(kind: KindConfig, reply: string): string | undefined {
+  const stops = knownBy(kind)?.stops;
+  return stops !== undefined && stops.reply.test(reply) ? stops.says : undefined;
+}
 
 /**
  * Whether the agent refused because it isn't signed in or set up: ACP's sign-in refusal, or the

@@ -58,14 +58,27 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   Goose and Grok offer their models as a session's `model` option, where they do, and the bridge
   offers them in Chips as it does Claude Code's and Codex's, each once (Copilot on GitHub's free plan
   lists Auto twice). Their files aren't read.
-- The Permissions page shows what each one's own settings let through, read and never written:
-  Copilot's Allow all, as its sessions say it (off: it asks before a tool, a path or a URL; on: it
-  never asks); Grok's mode, its rules from `~/.grok/config.toml` (`[permission] rules`), and the
-  permission rules it takes from Claude Code's settings, yours in `~/.claude` and each agent
-  folder's. Grok takes its mode from a Claude Code `defaultMode` first (the most specific file's),
-  then from its own `[ui] permission_mode` (or the older `yolo`), else Ask, and the page says which
-  file set it. For Antigravity and Goose it shows the mode a session runs in. Cursor's own settings
-  aren't read yet.
+- The Permissions page shows what each one's own settings let through, as Claude Code's are shown:
+  its mode, and what it runs on its own, asks about, and refuses, read and never written.
+  - **Copilot**: its Allow all, as its sessions say it (off: it asks before a tool, a path or a URL;
+    on: it never asks), each "don't ask again" it saved for an agent's folder
+    (`~/.copilot/permissions-config.json`, in `COPILOT_HOME`), and the URLs its `settings.json`
+    always allows or denies.
+  - **Grok**: its mode, its rules from `~/.grok/config.toml` (`[permission] rules`), and the
+    permission rules it takes from Claude Code's settings, yours in `~/.claude` and each agent
+    folder's. Grok takes its mode from a Claude Code `defaultMode` first (the most specific
+    file's), then from its own `[ui] permission_mode` (or the older `yolo`), else Ask, and the page
+    says which file set it.
+  - **Antigravity**: the mode Chips starts its sessions in, its `permissions` lists in
+    `~/.gemini/antigravity-cli/settings.json` (`command(git)`, `write_file(src/)`, …), and its
+    `toolPermission` where that says more (Always proceed lets everything through). Its project and
+    shared scopes aren't files the bridge can read.
+  - **Goose**: the mode Chips starts its sessions in, and the tools its `permission.yaml` (in
+    `~/.config/goose`, or `GOOSE_PATH_ROOT`'s) always allows, asks before, and never allows.
+  - **Cursor**: its `approvalMode` and `permissions` in `~/.cursor/cli-config.json`, with each agent
+    folder's `.cursor/cli.json` rules.
+- While Google wants an Antigravity account verified, Antigravity answers only "⚠ Verification
+  Required". The bridge fails that turn with what to do instead: `agy -p hi` prints the link.
 - An agent's refusal reaches the room in its own words: where JSON-RPC's message is only "Internal
   error", what its details say, as Grok's API answer ("Your Grok CLI version (0.2.99) is outdated …").
 - What signs one in from the environment is carried to the copy kept running: `CURSOR_API_KEY`,

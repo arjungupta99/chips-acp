@@ -1554,6 +1554,28 @@ describe("an agent that opens no session until asked to sign in (Chips ADR 0301)
   });
 });
 
+describe("Antigravity while Google wants its account verified (Chips ADR 0301)", () => {
+  it("fails the turn with what to do, in place of its bare \"⚠ Verification Required\"", async () => {
+    const agent = fakeAgent();
+    const { chips, logs } = await rig({ agent, command: ["agy", "acp"] });
+    await chips.say("verify");
+    const failed = await sent(chips, "run.failed");
+    assert.match(String(failed.payload["error"]), /^Google wants this Antigravity account verified before it answers\. Run `agy -p hi`/);
+    assert.equal(failed.payload["retryable"], true);
+    // Nothing of it is posted as the agent's words.
+    assert.ok(!chips.workspace.log.some((event) => event.type === "message.post" && String(event.payload["text"]).includes("Verification Required")));
+    assert.ok(logs.some((line) => line.includes("couldn't answer: Google wants")));
+  });
+
+  it("is said as it was by any other kind", async () => {
+    const agent = fakeAgent();
+    const { chips } = await rig({ agent });
+    await chips.say("verify");
+    await sent(chips, "run.completed");
+    assert.ok(chips.workspace.log.some((event) => event.type === "message.post" && event.payload["text"] === "⚠ Verification Required"));
+  });
+});
+
 describe("Copilot's and Grok's own permissions (Chips ADR 0301)", () => {
   it("sends Copilot's Allow all as its sessions say it, and again when one says it moved", async () => {
     const copies: unknown[] = [];

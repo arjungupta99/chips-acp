@@ -20,6 +20,8 @@
  * - `big`: it answers holding 150,000 tokens of its 200,000;
  * - `early`: it answers saying how full it is, with no result after (Claude Code's guess at its window);
  * - `fold`: it fills to 150,000, compacts itself to 30,000, and answers.
+ * - `verify`: it says `⚠ Verification Required` and ends the turn, as Antigravity does while Google
+ *   wants its account verified.
  *
  * With `compaction`, a prompt of `/compact` alone compacts the session to a quarter of what it held,
  * as Claude Code says it (`claude`: a tool call with `rawOutput`, then how full) or as Codex does
@@ -341,6 +343,11 @@ export function fakeAgent(
             say("Compacted. ctrl+o to see the summary");
           }
           await new Promise((resolve) => setTimeout(resolve, 10));
+          reply("end_turn");
+          return;
+        }
+        if (last === "verify") {
+          say("⚠ Verification Required");
           reply("end_turn");
           return;
         }

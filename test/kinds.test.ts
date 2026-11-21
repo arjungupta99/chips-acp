@@ -11,9 +11,22 @@ import { describe, it } from "node:test";
 import { type Install, makersFolder, readyAdapter, withFetchedAdapter } from "../src/adapter.ts";
 import type { KindConfig } from "../src/bridge.ts";
 import { AcpError, agentWords } from "../src/acp.ts";
-import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords } from "../src/kinds.ts";
+import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords, stoppedWith } from "../src/kinds.ts";
 import { lookAt } from "../src/models.ts";
-import { copilotOwnRules, grokModeFrom, grokModeOf, grokOwnRules, grokRulesOf, modeOwnRules } from "../src/own-rules.ts";
+import {
+  antigravityEntry,
+  antigravityOwnRules,
+  copilotOwnRules,
+  cursorEntry,
+  cursorOwnRules,
+  goosePermissionsOf,
+  gooseOwnRules,
+  grokModeFrom,
+  grokModeOf,
+  grokOwnRules,
+  grokRulesOf,
+  modeOwnRules,
+} from "../src/own-rules.ts";
 import { checkCommand, readConfig, SetupError } from "../src/setup.ts";
 
 const root = mkdtempSync(join(tmpdir(), "chips-acp-kinds-"));
@@ -392,3 +405,148 @@ describe("Copilot's and Grok's own permissions, on the Permissions page", () => 
     });
   });
 });
+
+describe("Antigravity's reply while Google wants its account verified", () => {
+  it("is known with or without its sign, and only for Antigravity", () => {
+    const agy = { name: "Antigravity", command: ["agy", "acp"], folders: "/f" };
+    for (const reply of ["⚠ Verification Required", "⚠️ Verification Required", "Verification Required.", "  ⚠ verification required\n"]) {
+      assert.match(stoppedWith(agy, reply) ?? "", /^Google wants this Antigravity account verified/, reply);
+    }
+    assert.equal(stoppedWith(agy, "⚠ Verification Required, but here is the answer: 42"), undefined);
+    assert.equal(stoppedWith({ name: "Grok", command: ["grok", "agent", "stdio"], folders: "/f" }, "⚠ Verification Required"), undefined);
+  });
+});
+
+describe("Antigravity's, Goose's, Cursor's and Copilot's own rules, as Claude Code's are shown", () => {
+  const home = "/Users/ada";
+  const antigravityMode = { id: "default", name: "Default", words: "Asks before edits and commands its settings don't allow." };
+
+  it("reads each of Antigravity's rules by its action", () => {
+    assert.deepEqual(antigravityEntry("command(git)"), { kind: "command", name: "command", words: ["git"], raw: "command(git)" });
+    assert.deepEqual(antigravityEntry("command(regex:npm run (build|test))"), { kind: "command", name: "command", raw: "command(regex:npm run (build|test))" });
+    assert.equal(antigravityEntry("command(*)")?.words, undefined);
+    assert.equal(antigravityEntry("read_file(/var/log)")?.kind, "read");
+    assert.equal(antigravityEntry("write_file(src/)")?.kind, "write");
+    assert.equal(antigravityEntry("read_url(google.com)")?.kind, "web");
+    assert.equal(antigravityEntry("execute_url(aws.amazon.com)")?.kind, "web");
+    assert.equal(antigravityEntry("mcp(linter/*)")?.kind, "tool");
+    assert.equal(antigravityEntry("unsandboxed(docker)")?.kind, "command");
+  });
+
+  it("is Antigravity's mode and its own lists, with its tool permission where it says more", () => {
+    const settings = {
+      toolPermission: "strict",
+      permissions: { allow: ["command(git)", "command(git)", "write_file(src/)"], deny: ["command(rm -rf)"], ask: ["command(*)"] },
+    };
+    const copy = antigravityOwnRules({ settingsPath: `${home}/.gemini/antigravity-cli/settings.json`, settings, running: "default", mode: antigravityMode, home });
+    assert.deepEqual(copy.read_from, ["the mode Chips starts each Antigravity session in", "~/.gemini/antigravity-cli/settings.json"]);
+    assert.equal(copy.mode, "Default");
+    assert.equal(copy.note, "Asks before edits and commands its settings don't allow. Its tool permission is Strict: it asks before every command, whatever the mode.");
+    assert.deepEqual(copy.runs.map((entry) => entry.raw), ["command(git)", "write_file(src/)"]);
+    assert.deepEqual(copy.asks?.map((entry) => entry.raw), ["command(*)"]);
+    assert.deepEqual(copy.refuses?.map((entry) => entry.words), [["rm", "-rf"]]);
+    // Always proceed approves everything, whatever the mode.
+    const skip = antigravityOwnRules({ settingsPath: "/s.json", settings: { toolPermission: "always-proceed" }, running: "default", mode: antigravityMode, home });
+    assert.deepEqual([skip.everything, skip.runs], [true, []]);
+    // No settings file: the mode alone.
+    const bare = antigravityOwnRules({ settingsPath: "/s.json", settings: undefined, running: "default", mode: antigravityMode, home });
+    assert.deepEqual([bare.runs, bare.asks, bare.refuses, bare.note], [[], [], [], antigravityMode.words]);
+  });
+
+  it("reads Goose's own lists from its permission.yaml, the user's only", () => {
+    const yaml = [
+      "user:",
+      "  always_allow:",
+      "  - developer__text_editor",
+      "  - 'developer__shell' # every command",
+      "  ask_before: []",
+      "  never_allow: [computercontroller__automation_script, \"x__y\"]",
+      "smart_approve:",
+      "  always_allow:",
+      "  - not__mine",
+    ].join("\n");
+    assert.deepEqual(goosePermissionsOf(yaml), {
+      always_allow: ["developer__text_editor", "developer__shell"],
+      ask_before: [],
+      never_allow: ["computercontroller__automation_script", "x__y"],
+    });
+    const copy = gooseOwnRules({
+      permissionPath: `${home}/.config/goose/permission.yaml`,
+      yaml,
+      running: "approve",
+      mode: { id: "approve", name: "Approve", words: "Asks before every tool call its own permission list doesn't settle." },
+      home,
+    });
+    assert.deepEqual(copy.read_from, ["the mode Chips starts each Goose session in", "~/.config/goose/permission.yaml"]);
+    // Its shell tool is any command.
+    assert.deepEqual(copy.runs.map((entry) => [entry.kind, entry.name, entry.words]), [
+      ["tool", "developer__text_editor", undefined],
+      ["command", "developer__shell", undefined],
+    ]);
+    assert.equal(copy.refuses?.length, 2);
+    // Auto never asks: nothing to list.
+    const auto = gooseOwnRules({ permissionPath: "/p.yaml", yaml, running: "auto", mode: { id: "auto", name: "Auto", words: "Never asks.", everything: true }, home });
+    assert.deepEqual([auto.everything, auto.runs], [true, []]);
+    assert.deepEqual(goosePermissionsOf(undefined), { always_allow: [], ask_before: [], never_allow: [] });
+  });
+
+  it("is Cursor's approval mode and its rules, its own and each agent folder's", () => {
+    assert.deepEqual(cursorEntry("Shell(curl:*)"), { kind: "command", name: "Shell", words: ["curl"], raw: "Shell(curl:*)" });
+    assert.equal(cursorEntry("Read(.env*)")?.kind, "read");
+    assert.equal(cursorEntry("Write(src/**)")?.kind, "write");
+    assert.equal(cursorEntry("WebFetch(*.github.com)")?.kind, "web");
+    assert.equal(cursorEntry("Mcp(datadog:*)")?.kind, "tool");
+    const copy = cursorOwnRules({
+      configPath: `${home}/.cursor/cli-config.json`,
+      config: { approvalMode: "allowlist", permissions: { allow: ["Shell(git)"], deny: ["Shell(rm)"] } },
+      folders: [{ path: `${home}/Chips/Agents/cursor/nova/.cursor/cli.json`, layer: { permissions: { allow: ["Shell(git)", "Read(src/**)"] } } }],
+      home,
+    });
+    assert.deepEqual(copy.read_from, ["~/.cursor/cli-config.json", "~/Chips/Agents/cursor/nova/.cursor/cli.json"]);
+    assert.equal(copy.mode, "Allowlist");
+    assert.deepEqual(copy.runs.map((entry) => entry.raw), ["Shell(git)", "Read(src/**)"]);
+    assert.deepEqual(copy.refuses?.map((entry) => entry.raw), ["Shell(rm)"]);
+    const everything = cursorOwnRules({ configPath: "/c.json", config: { approvalMode: "unrestricted" }, folders: [], home });
+    assert.deepEqual([everything.mode, everything.everything], ["Run everything", true]);
+    const unset = cursorOwnRules({ configPath: "/c.json", config: undefined, folders: [], home });
+    assert.equal(unset.mode, "Cursor's own");
+  });
+
+  it("is Copilot's Allow all with the yeses it saved for these agents' folders and its URL rules", () => {
+    const config = {
+      locations: {
+        [`${home}/Chips/Agents/copilot/nova`]: {
+          tool_approvals: [
+            { kind: "commands", commandIdentifiers: ["git:*", "npm test"] },
+            { kind: "write" },
+            { kind: "mcp", serverName: "github", toolName: null },
+          ],
+        },
+        "/somewhere/else": { tool_approvals: [{ kind: "commands", commandIdentifiers: ["rm:*"] }] },
+      },
+    };
+    const saved = {
+      configPath: `${home}/.copilot/permissions-config.json`,
+      config,
+      settingsPath: `${home}/.copilot/settings.json`,
+      settings: { allowedUrls: ["docs.github.com"], deniedUrls: ["evil.example"] },
+      folders: [`${home}/Chips/Agents/copilot/nova`],
+      home,
+    };
+    const copy = copilotOwnRules("off", saved);
+    assert.deepEqual(copy.read_from, ["Copilot's Allow all, as its sessions say it", "~/.copilot/permissions-config.json", "~/.copilot/settings.json"]);
+    assert.equal(copy.mode, "Asks first");
+    assert.deepEqual(copy.runs.map((entry) => [entry.kind, entry.words ?? entry.name]), [
+      ["command", ["git"]],
+      ["command", ["npm", "test"]],
+      ["write", "write"],
+      ["tool", "github(*)"],
+      ["web", "url"],
+    ]);
+    assert.deepEqual(copy.refuses?.map((entry) => entry.raw), ["evil.example"]);
+    assert.match(copy.note ?? "", /It runs on its own what it was told to keep allowing/);
+    // Allow all on: everything, nothing to list.
+    assert.deepEqual(copilotOwnRules("on", saved).runs, []);
+  });
+});
+
