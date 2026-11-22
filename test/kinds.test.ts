@@ -253,6 +253,10 @@ describe("an agent's refusal, in its own words", () => {
     });
     assert.equal(agentWords(grok), "API error (status 426 Upgrade Required): Your Grok CLI version (0.2.99) is outdated.");
     assert.equal(agentWords(new AcpError("Internal error", -32603, "Failed to resolve provider and model")), "Failed to resolve provider and model");
+    assert.equal(
+      agentWords(new AcpError("Invalid params", -32602, "session already has active run `resume_1`; use _goose/unstable/session/steer")),
+      "session already has active run `resume_1`; use _goose/unstable/session/steer",
+    );
     // Its own message where it says one, or where the details say nothing.
     assert.equal(agentWords(new AcpError("Authentication required", -32000, { message: "x" })), "Authentication required");
     assert.equal(agentWords(new AcpError("Internal error", -32603)), "Internal error");

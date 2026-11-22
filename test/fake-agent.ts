@@ -145,6 +145,12 @@ export function fakeAgent(
     models?: FakeModels;
     modes?: FakeModes;
     opening?: Promise<unknown>;
+    /**
+     * A call still waiting from before, run again when a session is loaded, as Goose 1.60.2 does:
+     * it asks about it during the load, and refuses prompts ("session already has active run")
+     * until the session is cancelled, and for `windsDownMs` after.
+     */
+    resumes?: { readonly windsDownMs?: number };
   } = {},
 ): FakeAgent {
   /** The first session it was spoken to in. */
@@ -173,6 +179,8 @@ export function fakeAgent(
       let asked = 0;
       const waiting = new Map<number, (result: Message) => void>();
       const cancelled = new Set<string>();
+      /** Sessions running a call from before, and when each stops refusing prompts once cancelled. */
+      const resuming = new Map<string, number>();
       /** Whether it was asked to sign in and said yes, where it has to be. */
       let signedIn = options.signIn === undefined;
       const send = (message: Message) => {
@@ -686,6 +694,18 @@ export function fakeAgent(
             return;
           }
           case "session/load":
+            if (options.resumes !== undefined) {
+              const sessionId = String(params["sessionId"]);
+              resuming.set(sessionId, Number.POSITIVE_INFINITY);
+              void ask("session/request_permission", {
+                sessionId,
+                toolCall: { toolCallId: "r1", kind: "other", status: "pending", title: "shell · echo again", rawInput: { command: "echo again" } },
+                options: [
+                  { optionId: "allow_once", name: "allow_once", kind: "allow_once" },
+                  { optionId: "reject_once", name: "reject_once", kind: "reject_once" },
+                ],
+              }).catch(() => undefined);
+            }
             agent.loaded.push(String(params["sessionId"]));
             agent.cwds.set(String(params["sessionId"]), String(params["cwd"]));
             agent.metas.push({ call: `load ${String(params["sessionId"])}`, meta: params["_meta"] });
@@ -709,6 +729,11 @@ export function fakeAgent(
             send({ id, result: {} });
             return;
           case "session/prompt": {
+            const until = resuming.get(String(params["sessionId"]));
+            if (until !== undefined && Date.now() < until) {
+              send({ id, error: { code: -32602, message: "Invalid params", data: "session already has active run `resume_1`; use _goose/unstable/session/steer" } });
+              return;
+            }
             const blocks = (params["prompt"] ?? []) as { text?: string }[];
             void prompt(id, String(params["sessionId"]), blocks.map((block) => block.text ?? "").join("\n"));
             return;
@@ -734,6 +759,9 @@ export function fakeAgent(
             return;
           }
           case "session/cancel":
+            if (resuming.has(String(params["sessionId"]))) {
+              resuming.set(String(params["sessionId"]), Date.now() + (options.resumes?.windsDownMs ?? 0));
+            }
             agent.cancels.push(String(params["sessionId"]));
             cancelled.add(String(params["sessionId"]));
             return;

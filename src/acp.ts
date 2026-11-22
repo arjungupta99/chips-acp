@@ -56,8 +56,8 @@ export interface AuthStatus {
 
 /**
  * What an agent said when it refused, in its own words: JSON-RPC's message, or what its details say
- * where the message is only "Internal error". Grok puts its API's answer there ("Your Grok CLI version
- * (0.2.99) is outdated …"), and Goose why it can't run.
+ * where the message is only "Internal error" or "Invalid params". Grok puts its API's answer there
+ * ("Your Grok CLI version (0.2.99) is outdated …"), and Goose why it can't run or take a prompt.
  */
 export function agentWords(error: AcpError): string {
   const data = error.data;
@@ -67,7 +67,7 @@ export function agentWords(error: AcpError): string {
       : typeof data === "object" && data !== null && typeof (data as { message?: unknown }).message === "string"
         ? (data as { message: string }).message
         : undefined;
-  if (said === undefined || said.trim() === "" || !/^internal error$/i.test(error.message.trim())) return error.message;
+  if (said === undefined || said.trim() === "" || !/^(?:internal error|invalid params)$/i.test(error.message.trim())) return error.message;
   return said.trim().slice(0, 600);
 }
 

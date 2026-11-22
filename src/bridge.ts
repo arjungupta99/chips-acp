@@ -110,6 +110,7 @@ import {
   signedOutWords,
   stoppedWith,
   toolNamedIn,
+  busyBy,
 } from "./kinds.js";
 import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, permissionsIn, pickedMode, withCurrent } from "./modes.js";
 import {
@@ -260,6 +261,9 @@ const WAIT_FOR_AGENT_MS = 15_000;
 /** The longest wait before running the agent again when it keeps stopping. */
 const MOST_RESPAWN_MS = 60_000;
 const IDLE_MS = 30 * 60_000;
+/** How long a prompt is sent again while the agent says a run of its own is still going, and how often. */
+const BUSY_MS = 10_000;
+const BUSY_RETRY_MS = 250;
 /** How many feedback ids are kept as answered, so a replay or a repeat looks again once. */
 const ANSWERED = 500;
 /** The most of a reply quoted back to the agent that said it. */
@@ -430,6 +434,8 @@ interface CompactRun {
 export class Bridge {
   private readonly process: Process = { live: new Set(), stale: new Set(), stopping: false, failures: 0 };
   private readonly rooms = new Map<string, Room>();
+  /** Sessions the agent asked about with no turn open: a call from before, run again when it was given the session back. */
+  private readonly resumed = new Set<string>();
   private readonly log: (line: string) => void;
   /** What Chips asks waits for the agents to be known: they are read at start. */
   private readonly known: Promise<void>;
@@ -1251,7 +1257,7 @@ export class Bridge {
       turn.prompting = true;
       turn.stopping = false;
       try {
-        stop = await client.prompt(sessionId, [{ type: "text", text: prompt }]);
+        stop = await this.prompted(client, sessionId, prompt);
       } catch (error) {
         turn.prompting = false;
         this.rules.forget(sessionId);
@@ -1356,6 +1362,10 @@ export class Bridge {
       try {
         const loaded = await client.loadSession(kept, record.folder, [], this.sessionMeta(record));
         live.add(kept);
+        if (this.resumed.delete(kept)) {
+          client.cancel(kept);
+          this.log(`${record.name}'s session ${kept} came back with a call still waiting from before; stopped it`);
+        }
         this.sessionOptions.set(kept, loaded.configOptions);
         this.permissionsHeard(loaded.configOptions);
         await this.moded(client, kept);
@@ -1637,6 +1647,22 @@ export class Bridge {
   }
 
   // ------------------------------------------------------------------ what the agent streams
+
+  /**
+   * A prompt, sent again for a few seconds while the agent says a run of its own is still going in
+   * the session (`busyBy`): Goose winds a run it took back down after it is stopped.
+   */
+  private async prompted(client: AcpClient, sessionId: string, text: string): Promise<string> {
+    const by = Date.now() + BUSY_MS;
+    for (;;) {
+      try {
+        return await client.prompt(sessionId, [{ type: "text", text }]);
+      } catch (error) {
+        if (!busyBy(this.options.kind, error) || Date.now() >= by) throw error;
+        await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_MS));
+      }
+    }
+  }
 
   private turnOf(sessionId: string): Turn | undefined {
     for (const room of this.rooms.values()) {
@@ -2489,7 +2515,12 @@ export class Bridge {
       kind: string;
       name?: string;
     }[];
-    if (turn === undefined) return { outcome: { outcome: "cancelled" } };
+    if (turn === undefined) {
+      // Asked with no turn of Chips's open: a call still waiting from before, which an agent given
+      // its session back runs again (Goose). Its run is stopped once the session is back.
+      this.resumed.add(String(params["sessionId"]));
+      return { outcome: { outcome: "cancelled" } };
+    }
     // Asked as its prompt was being stopped, for a Pause or an ask nobody answered: ACP has what it
     // still asks answered cancelled.
     if (turn.pausing || turn.unanswered) return { outcome: { outcome: "cancelled" } };

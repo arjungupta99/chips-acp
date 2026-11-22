@@ -79,6 +79,12 @@ interface Known {
    * Always for one command would answer every tool Goose has.
    */
   readonly toolMeta?: string;
+  /**
+   * How it refuses a prompt while a run of its own is still going in the session: Goose, given a
+   * session back with a call still waiting from before, runs that call again first, and refuses
+   * prompts with "session already has active run" until it ends.
+   */
+  readonly busy?: RegExp;
 }
 
 const SIGN_IN_DOING = "Run this in Terminal, then try again. Your browser opens to sign in.";
@@ -224,6 +230,7 @@ const KNOWN: readonly Known[] = [
     unready: /GOOSE_PROVIDER|resolve provider and model/,
     lacks: { detail: "No model provider", says: "has no model provider set up" },
     toolMeta: "goose",
+    busy: /already has active run/,
   },
   {
     id: "copilot",
@@ -328,6 +335,14 @@ export function toolNamedIn(kind: KindConfig, call: Readonly<Record<string, unkn
   const named = typeof own === "object" && own !== null ? (own as Record<string, unknown>)["toolCall"] : undefined;
   const tool = typeof named === "object" && named !== null ? (named as Record<string, unknown>)["toolName"] : undefined;
   return typeof tool === "string" && tool !== "" ? tool : undefined;
+}
+
+/** Whether the agent refused a prompt because a run of its own is still going in that session (`busy`). */
+export function busyBy(kind: KindConfig, error: unknown): boolean {
+  const busy = knownBy(kind)?.busy;
+  if (busy === undefined || !(error instanceof AcpError)) return false;
+  const data = typeof error.data === "string" ? error.data : JSON.stringify(error.data ?? "");
+  return busy.test(`${error.message} ${data}`);
 }
 
 /**

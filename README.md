@@ -46,7 +46,9 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   opens a browser on the machine each time.
 - **Goose** starts in Auto, which never asks, unless `GOOSE_MODE` says otherwise, so each session
   goes into Approve. With no model provider set up it refuses a session with an internal error
-  naming `GOOSE_PROVIDER`, which the bridge says as "Goose has no model provider set up".
+  naming `GOOSE_PROVIDER`, which the bridge says as "Goose has no model provider set up". Given
+  a session back with a call still waiting from before (its bridge restarted during an ask), Goose
+  runs that call again and refuses prompts until it ends, so the bridge stops it and sends the turn.
 - **Grok** opens no session until it is asked to sign in (`authenticate`), as xAI's own ACP example
   does: by its API key where `XAI_API_KEY` is set, else by what `grok login` saved. Signed out, it
   offers neither, and its session is refused. Its ACP sessions have no mode to be put in. It is left

@@ -619,6 +619,35 @@ describe("a session that goes quiet", () => {
     assert.deepEqual(Object.values(state.sessions), agent.made);
   });
 
+  it("stops the run of a call from before that Goose takes back with its session, then prompts", async () => {
+    // Goose 1.60.2, given back a session whose call was waiting when its bridge restarted, runs
+    // that call again and refused the room's next turn: "session already has active run".
+    const agent = fakeAgent({ loadSession: true, close: true, resumes: { windsDownMs: 300 } });
+    const { chips, logs } = await rig({ agent, idleMs: 60, command: ["goose", "acp"] });
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    await until(() => agent.closed.length === 1);
+    await chips.say("two");
+    await chips.waitFor(
+      (event) => (event.type === "run.completed" && agent.prompts.length === 2 ? event : undefined),
+      5000,
+    );
+    assert.deepEqual(agent.loaded, agent.made);
+    assert.ok(agent.cancels.includes(agent.made[0] ?? ""), "the call from before, stopped");
+    assert.ok(logs.some((line) => line.includes("came back with a call still waiting from before")));
+  });
+
+  it("fails a turn the agent still says is busy after a while, with its own words", async () => {
+    const agent = fakeAgent({ loadSession: true, close: true, resumes: { windsDownMs: 60_000 } });
+    const { chips } = await rig({ agent, idleMs: 60, command: ["goose", "acp"] });
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    await until(() => agent.closed.length === 1);
+    await chips.say("two");
+    const failed = await chips.waitFor((event) => (event.type === "run.failed" ? event : undefined), 15_000);
+    assert.match(String(failed.payload["error"]), /session already has active run/);
+  });
+
   it("stays open where the agent couldn't load it again", async () => {
     const agent = fakeAgent({ close: true });
     const { chips } = await rig({ agent, idleMs: 30 });
