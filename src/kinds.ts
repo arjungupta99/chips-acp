@@ -72,6 +72,13 @@ interface Known {
    * the account verified, and says nothing of where.
    */
   readonly stops?: { readonly reply: RegExp; readonly says: string };
+  /**
+   * Where it names a tool call's tool, when it gives neither `name` nor an ACP `kind`: the key in
+   * the call's `_meta` that holds `toolCall.toolName`. Goose names its own there ("shell",
+   * "write") and calls every ask "other", so without it each Goose ask is one action kind, and an
+   * Always for one command would answer every tool Goose has.
+   */
+  readonly toolMeta?: string;
 }
 
 const SIGN_IN_DOING = "Run this in Terminal, then try again. Your browser opens to sign in.";
@@ -216,6 +223,7 @@ const KNOWN: readonly Known[] = [
     keys: ["GOOSE_PROVIDER", "GOOSE_MODEL", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"],
     unready: /GOOSE_PROVIDER|resolve provider and model/,
     lacks: { detail: "No model provider", says: "has no model provider set up" },
+    toolMeta: "goose",
   },
   {
     id: "copilot",
@@ -309,6 +317,17 @@ export const speaksAcp = (known: Pick<Known, "adapter">): boolean => known.adapt
 export function stoppedWith(kind: KindConfig, reply: string): string | undefined {
   const stops = knownBy(kind)?.stops;
   return stops !== undefined && stops.reply.test(reply) ? stops.says : undefined;
+}
+
+/** The tool a call is for, where the kind names it in the call's `_meta` (`toolMeta`). */
+export function toolNamedIn(kind: KindConfig, call: Readonly<Record<string, unknown>>): string | undefined {
+  const key = knownBy(kind)?.toolMeta;
+  const meta = call["_meta"];
+  if (key === undefined || typeof meta !== "object" || meta === null) return undefined;
+  const own = (meta as Record<string, unknown>)[key];
+  const named = typeof own === "object" && own !== null ? (own as Record<string, unknown>)["toolCall"] : undefined;
+  const tool = typeof named === "object" && named !== null ? (named as Record<string, unknown>)["toolName"] : undefined;
+  return typeof tool === "string" && tool !== "" ? tool : undefined;
 }
 
 /**

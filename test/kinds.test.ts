@@ -11,7 +11,7 @@ import { describe, it } from "node:test";
 import { type Install, makersFolder, readyAdapter, withFetchedAdapter } from "../src/adapter.ts";
 import type { KindConfig } from "../src/bridge.ts";
 import { AcpError, agentWords } from "../src/acp.ts";
-import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords, stoppedWith } from "../src/kinds.ts";
+import { installWords, keptEnvOf, knownConfig, knownIdOf, knownOf, modesOf, notInstalledStop, signedOutBy, signedOutStop, signedOutWords, stoppedWith, toolNamedIn } from "../src/kinds.ts";
 import { lookAt } from "../src/models.ts";
 import {
   antigravityEntry,
@@ -550,3 +550,15 @@ describe("Antigravity's, Goose's, Cursor's and Copilot's own rules, as Claude Co
   });
 });
 
+describe("the tool a call names in its _meta (Goose)", () => {
+  const goose = { name: "Goose", command: ["/home/someone/.local/bin/goose", "acp"], folders: "/tmp" };
+  const call = { _meta: { goose: { toolCall: { toolName: "shell", extensionName: "developer" } } } };
+  it("reads Goose's toolCall.toolName", () => {
+    assert.equal(toolNamedIn(goose, call), "shell");
+  });
+  it("reads nothing for a call without it, or for a kind that doesn't name tools there", () => {
+    assert.equal(toolNamedIn(goose, {}), undefined);
+    assert.equal(toolNamedIn(goose, { _meta: { goose: { toolCall: { toolName: "" } } } }), undefined);
+    assert.equal(toolNamedIn({ name: "Grok", command: ["grok", "agent", "stdio"], folders: "/tmp" }, call), undefined);
+  });
+});

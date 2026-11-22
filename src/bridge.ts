@@ -109,6 +109,7 @@ import {
   signedOutBy,
   signedOutWords,
   stoppedWith,
+  toolNamedIn,
 } from "./kinds.js";
 import { currentIn, modesCopy, modeTarget, offeredIn, onModeChange, permissionsIn, pickedMode, withCurrent } from "./modes.js";
 import {
@@ -394,7 +395,8 @@ interface Turn {
   cost?: number | undefined;
   saidAt: number;
   gaugeAt: number;
-  readonly steps: Map<string, { title: string; tool: string; kind: StepKind; done: boolean }>;
+  /** Each tool call so far, with the tool its agent named in `_meta` where it does (`toolNamedIn`). */
+  readonly steps: Map<string, { title: string; tool: string; kind: StepKind; done: boolean; named?: string; input?: unknown }>;
   /** Tool calls a person allowed, to their approvals: the card says how each went. */
   readonly allowed: Map<string, string>;
   /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
@@ -1724,12 +1726,14 @@ export class Bridge {
     if (stepId === "") return;
     const known = turn.steps.get(stepId);
     const title = typeof update["title"] === "string" ? update["title"] : (known?.title ?? "A tool call");
-    const tool = toolOf(update) ?? known?.tool ?? "tool";
-    const kind = kindOf(update["kind"]) ?? known?.kind ?? "other";
+    const named = toolNamedIn(this.options.kind, update) ?? known?.named;
+    const tool = named ?? toolOf(update) ?? known?.tool ?? "tool";
+    const kind = kindOf(update["kind"]) ?? (named === undefined ? undefined : TOOL_KINDS[named]) ?? known?.kind ?? "other";
     const status = update["status"];
     const done = status === "completed" || status === "failed";
     if (known?.done === true) return;
-    turn.steps.set(stepId, { title, tool, kind, done });
+    const input = update["rawInput"] ?? known?.input;
+    turn.steps.set(stepId, { title, tool, kind, done, ...(named === undefined ? {} : { named }), ...(input === undefined ? {} : { input }) });
     const approvalId = turn.allowed.get(stepId);
     if (done && approvalId !== undefined) {
       turn.allowed.delete(stepId);
@@ -1740,7 +1744,8 @@ export class Bridge {
       .step({
         stepId,
         status: status === "failed" ? "failed" : done ? "done" : "started",
-        title: `${tool} · ${title}`.slice(0, 300),
+        // Goose's title starts with its tool already: "shell · npm test".
+        title: (title.startsWith(`${tool} · `) ? title : `${tool} · ${title}`).slice(0, 300),
         tool,
         kind,
       })
@@ -2489,13 +2494,17 @@ export class Bridge {
     // still asks answered cancelled.
     if (turn.pausing || turn.unanswered) return { outcome: { outcome: "cancelled" } };
     const call = (params["toolCall"] ?? {}) as Record<string, unknown>;
-    const kind = toolOf(call) ?? "other";
+    // Goose's ask names no tool, only "other": the tool is the one its tool call named before it.
+    const before = turn.steps.get(String(call["toolCallId"] ?? ""));
+    const named = toolNamedIn(this.options.kind, call) ?? before?.named;
+    const kind = named ?? toolOf(call) ?? "other";
     const title = typeof call["title"] === "string" ? call["title"] : `use ${kind}`;
-    const input = call["rawInput"];
+    const input = askedInput(call["rawInput"], typeof call["kind"] === "string" ? call["kind"] : undefined, title, before?.input);
+    const tool = named ?? (typeof call["name"] === "string" ? call["name"] : undefined);
     const asked = turn.run.approval({
       action: { kind: `acp.${slugOf(kind)}`, input: input ?? {} },
       question: questionFor(title, input, {
-        ...(typeof call["name"] === "string" ? { tool: call["name"] } : {}),
+        ...(tool === undefined ? {} : { tool }),
         ...(typeof call["kind"] === "string" ? { kind: call["kind"] } : {}),
       }),
       lasts: "once",
@@ -2676,6 +2685,15 @@ const KINDS: Readonly<Record<string, StepKind>> = {
   other: "other",
 };
 
+/** What a tool its agent named does, for a call that has no ACP kind: Goose's own tools. */
+const TOOL_KINDS: Readonly<Record<string, StepKind>> = {
+  shell: "shell",
+  write: "edit",
+  edit: "edit",
+  tree: "file",
+  read: "file",
+};
+
 function kindOf(kind: unknown): StepKind | undefined {
   return typeof kind === "string" ? KINDS[kind] : undefined;
 }
@@ -2716,13 +2734,45 @@ export function questionFor(title: string, input: unknown, call: { tool?: string
   return `${asked} \`${clip(command, room)}\``;
 }
 
+/**
+ * An ask's input, with its command where Chips reads one: `command` (Chips ADR 0239). Chips keeps
+ * an Always for a command by how it starts, and for anything else the kind whole, so a command
+ * Chips can't find would be kept as every command of that kind. Antigravity gives its command as
+ * `CommandLine`; Cursor's ask can come with no input, its command in the call before it or in a
+ * title of the command in backticks.
+ */
+export function askedInput(input: unknown, kind: string | undefined, title: string, before?: unknown): unknown {
+  if (input !== undefined && (typeof input !== "object" || input === null || Array.isArray(input))) return input;
+  const fields = (input ?? {}) as Record<string, unknown>;
+  if (commandIn(fields) !== undefined) return input;
+  const found =
+    (typeof fields["CommandLine"] === "string" && fields["CommandLine"].trim() !== "" ? fields["CommandLine"] : undefined) ??
+    (kind === "execute" ? (commandIn(before) ?? /^`([^`]+)`$/.exec(title.trim())?.[1]) : undefined);
+  return found === undefined ? input : { ...fields, command: found };
+}
+
+/** A command an input gives as `command`: a string, or its words. */
+function commandIn(input: unknown): string | readonly string[] | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const command = (input as Record<string, unknown>)["command"];
+  if (typeof command === "string") return command.trim() === "" ? undefined : command;
+  return Array.isArray(command) && command.length > 0 && command.every((word) => typeof word === "string") ? command : undefined;
+}
+
 /** The verb for a file tool's call, by its kind, where its name doesn't give one. */
 const FILE_VERBS: Readonly<Record<string, string>> = { read: "read", edit: "edit", delete: "delete", move: "move" };
 
+/** Tool names that are verbs, said as they are: Goose's "write · notes.md" is "write notes.md". */
+const VERB_TOOLS = new Set(["write", "edit", "read", "delete", "move", "fetch", "search"]);
+
 /** A call's title as the rest of "Allow it to …". */
 function titleSaid(title: string, command: string | undefined, call: { tool?: string; kind?: string }): string {
-  const bare = title.replace(/^`(.*)`$/s, "$1").trim();
+  // Goose's titles start with the tool's name: "shell · npm test", "write · notes.md".
+  const prefix = call.tool === undefined ? undefined : `${call.tool} · `;
+  const rest = prefix !== undefined && title.startsWith(prefix) ? title.slice(prefix.length).trim() : undefined;
+  const bare = (rest ?? title).replace(/^`(.*)`$/s, "$1").trim();
   if (command !== undefined && bare === command && !command.includes("`")) return `run \`${command}\``;
+  if (rest !== undefined && rest !== "") return VERB_TOOLS.has(call.tool ?? "") ? `${call.tool} ${rest}` : `use ${call.tool} on ${rest}`;
   const file = /^File\s+(\S.*)$/s.exec(title);
   const verb = /^([a-z]+)_file$/.exec(call.tool ?? "")?.[1] ?? FILE_VERBS[call.kind ?? ""];
   if (file !== null && verb !== undefined) return `${verb} ${file[1]}`;

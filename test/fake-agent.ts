@@ -439,6 +439,58 @@ export function fakeAgent(
           reply("end_turn");
           return;
         }
+        if (last === "ask cursor") {
+          // Cursor's, as an ACP client recorded them: the command in the call before the ask, the
+          // ask with no input and the command as its title in backticks.
+          update(sessionId, { sessionUpdate: "tool_call", toolCallId: "c1", title: "`npm test`", kind: "execute", status: "pending", rawInput: { command: "npm test" } });
+          const answer = await ask("session/request_permission", {
+            sessionId,
+            toolCall: {
+              toolCallId: "c1",
+              title: "`npm test`",
+              kind: "execute",
+              status: "pending",
+              content: [{ type: "content", content: { type: "text", text: "Run the test suite" } }],
+            },
+            options: [
+              { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+              { optionId: "allow-always", name: "Allow always", kind: "allow_always" },
+              { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+            ],
+          });
+          const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+          agent.given.push(outcome.optionId ?? outcome.outcome);
+          say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
+          reply("end_turn");
+          return;
+        }
+        if (last === "ask goose") {
+          // Goose 1.60.2's, as it sent them: the tool named only in `_meta`, the ask's kind "other".
+          const meta = { goose: { toolCall: { toolName: "shell", extensionName: "developer" } } };
+          update(sessionId, {
+            sessionUpdate: "tool_call",
+            toolCallId: "g1",
+            title: "shell · echo hi > hello.txt",
+            rawInput: { command: "echo hi > hello.txt" },
+            _meta: meta,
+          });
+          const answer = await ask("session/request_permission", {
+            sessionId,
+            toolCall: { toolCallId: "g1", kind: "other", status: "pending", title: "shell · echo hi > hello.txt", rawInput: { command: "echo hi > hello.txt" } },
+            options: [
+              { optionId: "allow_always", name: "allow_always", kind: "allow_always" },
+              { optionId: "allow_once", name: "allow_once", kind: "allow_once" },
+              { optionId: "reject_once", name: "reject_once", kind: "reject_once" },
+              { optionId: "reject_always", name: "reject_always", kind: "reject_always" },
+            ],
+          });
+          const outcome = answer["outcome"] as { outcome: string; optionId?: string };
+          agent.given.push(outcome.optionId ?? outcome.outcome);
+          update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "g1", status: "completed" });
+          say(outcome.outcome === "selected" ? `Given: ${outcome.optionId}` : "Given nothing");
+          reply("end_turn");
+          return;
+        }
         if (last === "ask plan" || last === "ask plan bare") {
           // Claude Code's plan ask (ExitPlanMode), with the options its adapter gives it:
           // `buildExitPlanModePermissionOptions` in @agentclientprotocol/claude-agent-acp 0.90.0.

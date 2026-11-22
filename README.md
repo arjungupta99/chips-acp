@@ -204,6 +204,12 @@ its asks). Then nothing reaches Chips as a card. Put them where they ask:
   adapter doesn't offer leaves it in the mode above. This is for the kinds as known here, started
   in the mode above; a config with another `mode` or `command` gets no picker. Needs Chips SDK
   1.0.11; on an older one the sessions stay in the mode above.
+- Each ask reaches Chips with its command as `command`, where Chips reads it, so an Always keeps
+  how that command starts and no more (Chips ADR 0239). Antigravity gives it as `CommandLine`, and
+  Cursor's ask can come without it, the command in the call before; the bridge copies it over.
+  Goose calls every ask "other" and names its tool only in the call's `_meta`, so the bridge names
+  the ask by that tool (`acp.shell`, `acp.write`): kept as `acp.other`, an Always for one command
+  would have answered every tool Goose has.
 
 ## Live
 

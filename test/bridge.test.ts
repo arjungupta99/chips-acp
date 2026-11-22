@@ -21,6 +21,7 @@ import {
   lookAgainPrompt,
   optionFor,
   questionFor,
+  askedInput,
   titleFrom,
   UNANSWERED,
 } from "../src/bridge.ts";
@@ -912,6 +913,43 @@ describe("what it asks", () => {
     assert.equal(words.payload["text"], "Given: once");
   });
 
+  it("names Goose's ask by the tool its call named, so an Always keeps that command's start alone", async () => {
+    // Goose 1.60.2 names its tool only in the call's `_meta`, and calls every ask "other": filed
+    // as `acp.other`, an Always for `echo` would have answered every tool Goose has.
+    const { chips } = await rig({ command: ["goose", "acp"] });
+    await chips.say("ask goose");
+    const asked = await sent(chips, "approval.request");
+    assert.equal((asked.payload["action"] as { kind: string }).kind, "acp.shell");
+    assert.equal(asked.payload["question"], "Allow it to run `echo hi > hello.txt`?");
+    const step = await sent(chips, "step.log", (event) => event.payload["step_id"] === "g1");
+    assert.equal(step.payload["title"], "shell · echo hi > hello.txt");
+    assert.equal(step.payload["tool"], "shell");
+    assert.equal(step.payload["kind"], "shell");
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: allow_once");
+  });
+
+  it("asks Cursor's command with the command Chips keeps an Always by, from the call before the ask", async () => {
+    const { chips } = await rig({ command: ["cursor-agent", "acp"] });
+    await chips.say("ask cursor");
+    const asked = await sent(chips, "approval.request");
+    const action = asked.payload["action"] as { kind: string; input: Record<string, unknown> };
+    assert.equal(action.kind, "acp.execute");
+    assert.deepEqual(action.input, { command: "npm test" });
+    assert.equal(asked.payload["question"], "Allow it to run `npm test`?");
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: allow-once");
+  });
+
+  it("leaves the same ask as it was for an agent that doesn't name its tools in _meta", async () => {
+    const { chips } = await rig();
+    await chips.say("ask goose");
+    const asked = await sent(chips, "approval.request");
+    assert.equal((asked.payload["action"] as { kind: string }).kind, "acp.other");
+  });
+
   it("asks a command in the agent's own words where it gives them, the command after in mono", async () => {
     const { chips } = await rig();
     await chips.say("ask shell");
@@ -983,6 +1021,36 @@ describe("what it asks", () => {
     assert.equal(questionFor("File notes.md", {}, { kind: "read" }), "Allow it to read notes.md?");
     // With neither, the title is left as it was.
     assert.equal(questionFor("File notes.md", {}), "Allow it to file notes.md?");
+  });
+
+  it("hands Chips each ask's command as `command`, where the agent gave it another way", () => {
+    // Antigravity's run_command.
+    assert.deepEqual(askedInput({ CommandLine: "uname -s", WaitMsBeforeAsync: 5000, toolSummary: "Get OS kernel name" }, "execute", "uname -s"), {
+      CommandLine: "uname -s",
+      WaitMsBeforeAsync: 5000,
+      toolSummary: "Get OS kernel name",
+      command: "uname -s",
+    });
+    // Cursor's ask with no input: the call before it, else a title in backticks.
+    assert.deepEqual(askedInput(undefined, "execute", "`npm test`", { command: "npm test" }), { command: "npm test" });
+    assert.deepEqual(askedInput(undefined, "execute", "`npm run build`"), { command: "npm run build" });
+    // A command already where Chips reads it, an input that isn't an object, or no command: as given.
+    const given = { command: ["git", "status"] };
+    assert.equal(askedInput(given, "execute", "git status"), given);
+    assert.equal(askedInput("ls -a", "execute", "ls"), "ls -a");
+    assert.equal(askedInput(undefined, "edit", "`notes.md`"), undefined);
+    assert.deepEqual(askedInput({ path: "a.txt" }, "edit", "Write a.txt"), { path: "a.txt" });
+  });
+
+  it("words Goose's asks, whose titles start with the tool's name", () => {
+    assert.equal(
+      questionFor("shell · echo hi > hello.txt", { command: "echo hi > hello.txt" }, { tool: "shell", kind: "other" }),
+      "Allow it to run `echo hi > hello.txt`?",
+    );
+    assert.equal(questionFor("write · notes.md", { path: "notes.md", content: "hello" }, { tool: "write" }), "Allow it to write notes.md?");
+    assert.equal(questionFor("tree · src", { path: "src" }, { tool: "tree" }), "Allow it to use tree on src?");
+    // A title that doesn't start with its tool is said as before.
+    assert.equal(questionFor("Run npm test", { command: "npm test" }, { tool: "shell" }), "Allow it to run npm test?");
   });
 
   it("cuts a long command short inside its span, and keeps every question to 200 characters", () => {
