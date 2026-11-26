@@ -54,8 +54,11 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   offers neither, and its session is refused. Its ACP sessions have no mode to be put in. It is left
   to update itself: xAI's API refuses one too old, and a Grok only Chips runs would never be updated
   otherwise.
-- **Antigravity**'s Auto is offered only where Antigravity has it: a personal Google account with
-  its terminal sandbox on.
+- **Antigravity** runs on a Gemini API key where `GEMINI_API_KEY` is set: the bridge asks it to sign
+  in that way (`authenticate` with `gemini-api-key`), which Google names for use with nobody at the
+  screen. That needs no `modelProvider` in its settings, so `agy` in a terminal stays on the Google
+  account. With no key, it runs on the account `agy acp --login` saved. Its Auto is offered only
+  where Antigravity has it: a personal Google account with its terminal sandbox on.
 - None of the five copies a session (`session/fork`), so their cards leave Fork off. Cursor, Copilot,
   Goose and Grok offer their models as a session's `model` option, where they do, and the bridge
   offers them in Chips as it does Claude Code's and Codex's, each once (Copilot on GitHub's free plan
@@ -80,7 +83,9 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   - **Cursor**: its `approvalMode` and `permissions` in `~/.cursor/cli-config.json`, with each agent
     folder's `.cursor/cli.json` rules.
 - While Google wants an Antigravity account verified, Antigravity answers only "⚠ Verification
-  Required". The bridge fails that turn with what to do instead: `agy -p hi` prints the link.
+  Required". The bridge fails that turn with what to do instead: `agy -p hi` prints the link. It
+  gives Google's refusal of its Gemini API key as its words too ("⚠ agent executor error: … API key
+  not valid"), and the bridge fails that turn with where to make a new key.
 - An agent's refusal reaches the room in its own words: where JSON-RPC's message is only "Internal
   error", what its details say, as Grok's API answer ("Your Grok CLI version (0.2.99) is outdated …").
 - What signs one in from the environment is carried to the copy kept running: `CURSOR_API_KEY`,

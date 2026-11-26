@@ -22,6 +22,8 @@
  * - `fold`: it fills to 150,000, compacts itself to 30,000, and answers.
  * - `verify`: it says `⚠ Verification Required` and ends the turn, as Antigravity does while Google
  *   wants its account verified.
+ * - `badkey`: it says Google's refusal of its Gemini API key as its words and ends the turn, as
+ *   Antigravity does on a wrong key.
  *
  * With `compaction`, a prompt of `/compact` alone compacts the session to a quarter of what it held,
  * as Claude Code says it (`claude`: a tool call with `rawOutput`, then how full) or as Codex does
@@ -133,9 +135,10 @@ export function fakeAgent(
     auth?: "in" | "out";
     /**
      * Ways it signs in that it opens no session until asked to sign in by (`authenticate`), as
-     * Grok's; `refuse` says no to every one.
+     * Grok's; `refuse` says no to every one. With `saved`, it opens sessions unasked on what it
+     * saved, as Antigravity on its Google account, and may still be asked to run on a key.
      */
-    signIn?: { readonly methods: readonly string[]; readonly refuse?: boolean };
+    signIn?: { readonly methods: readonly string[]; readonly refuse?: boolean; readonly saved?: boolean };
     /** Its sessions' Allow all, as Copilot's: an option of category `permissions`. */
     allowAll?: "on" | "off";
     refusesSessions?: boolean;
@@ -182,7 +185,7 @@ export function fakeAgent(
       /** Sessions running a call from before, and when each stops refusing prompts once cancelled. */
       const resuming = new Map<string, number>();
       /** Whether it was asked to sign in and said yes, where it has to be. */
-      let signedIn = options.signIn === undefined;
+      let signedIn = options.signIn === undefined || options.signIn.saved === true;
       const send = (message: Message) => {
         if (!gone) setImmediate(() => listener(JSON.stringify({ jsonrpc: "2.0", ...message })));
       };
@@ -356,6 +359,13 @@ export function fakeAgent(
         }
         if (last === "verify") {
           say("⚠ Verification Required");
+          reply("end_turn");
+          return;
+        }
+        if (last === "badkey") {
+          say(
+            "\n⚠ agent executor error: generating and executing: Error 400, Message: API key not valid. Please pass a valid API key., Status: INVALID_ARGUMENT, Details: [map[@type:type.googleapis.com/google.rpc.ErrorInfo domain:googleapis.com metadata:map[service:generativelanguage.googleapis.com] reason:API_KEY_INVALID]]",
+          );
           reply("end_turn");
           return;
         }

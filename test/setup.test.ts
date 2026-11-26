@@ -111,6 +111,19 @@ describe("the agent started and signed in, before the link is taken up", () => {
     assert.deepEqual(keyed.authenticated, ["xai.api_key"]);
   });
 
+  it("asks Antigravity to run on its Gemini API key where one is set, and nothing where none is", async () => {
+    const agy = { name: "Antigravity", command: ["agy", "acp"], folders: folder };
+    const methods = ["oauth-personal", "oauth-business", "gemini-api-key", "agent-platform"];
+    const keyed = fakeAgent({ signIn: { methods, saved: true } });
+    await checkSignIn(agy, keyed.wire(), folder, { env: { GEMINI_API_KEY: "test-key" } });
+    assert.deepEqual(keyed.authenticated, ["gemini-api-key"]);
+    assert.equal(keyed.made.length, 1);
+    const saved = fakeAgent({ signIn: { methods, saved: true } });
+    await checkSignIn(agy, saved.wire(), folder, { env: { GEMINI_API_KEY: "" } });
+    assert.deepEqual(saved.authenticated, []);
+    assert.equal(saved.made.length, 1);
+  });
+
   it("stops on an agent that offers no way to sign in with nobody at a browser, or refuses the one it offers", async () => {
     const grok = { name: "Grok", command: ["grok", "agent", "stdio"], folders: folder };
     const signedOut = /^Grok isn't signed in on this machine: run `grok login` in a new terminal, or `grok login --device-auth` on a machine with no screen\./;

@@ -56,7 +56,8 @@ interface Known {
   readonly keys?: readonly string[];
   /**
    * The ways it signs in with nobody at a browser, the first it offers taken, where it has to be
-   * asked to (`authenticate`) before it opens a session; one with `env` only while that is set.
+   * asked to (`authenticate`) before it opens a session, or is asked to run on a key in place of
+   * the account it saved; one with `env` only while that is set.
    */
   readonly headless?: readonly { readonly id: string; readonly env?: string }[];
   /**
@@ -69,9 +70,10 @@ interface Known {
   /**
    * A reply it gives in place of an answer when its account can't be used, and what Chips says
    * instead, as a failed turn: Antigravity answers "⚠ Verification Required" while Google wants
-   * the account verified, and says nothing of where.
+   * the account verified, and says nothing of where, and gives Google's refusal of its Gemini API
+   * key as its words.
    */
-  readonly stops?: { readonly reply: RegExp; readonly says: string };
+  readonly stops?: readonly { readonly reply: RegExp; readonly says: string }[];
   /**
    * Where it names a tool call's tool, when it gives neither `name` nor an ACP `kind`: the key in
    * the call's `_meta` that holds `toolCall.toolName`. Goose names its own there ("shell",
@@ -270,11 +272,23 @@ const KNOWN: readonly Known[] = [
     signInLine: "agy acp --login",
     signInDoing: "Run this in Terminal, then try again. It gives you a Google sign-in link; paste back the code you get.",
     keys: ["GEMINI_API_KEY"],
-    stops: {
-      reply: /^[\s⚠\uFE0F]*Verification Required[\s.!]*$/i,
-      says:
-        "Google wants this Antigravity account verified before it answers. Run `agy -p hi` in a new terminal: it prints a link to verify the account in your browser. Then send this again.",
-    },
+    // On a Gemini API key where one is set, which Google names for use with nobody at the screen;
+    // else on the Google account `agy acp --login` saved, which it needs no asking for. Asked over
+    // ACP, it runs on the key with no `modelProvider` in its settings, so `agy` in a terminal stays
+    // on the account. It checks only that the key isn't empty: a wrong one is refused at the turn.
+    headless: [{ id: "gemini-api-key", env: "GEMINI_API_KEY" }],
+    stops: [
+      {
+        reply: /^[\s⚠\uFE0F]*Verification Required[\s.!]*$/i,
+        says:
+          "Google wants this Antigravity account verified before it answers. Run `agy -p hi` in a new terminal: it prints a link to verify the account in your browser. Then send this again.",
+      },
+      {
+        reply: /^[\s⚠\uFE0F]*agent executor error\b[\s\S]*\b(?:API key not valid|API_KEY_INVALID|API key expired|API_KEY_EXPIRED)\b/i,
+        says:
+          "Google refused the Gemini API key Antigravity runs on here. Make a new key at https://aistudio.google.com/app/apikey, connect Antigravity again with `GEMINI_API_KEY` set to it, then send this again.",
+      },
+    ],
   },
   {
     id: "grok",
@@ -322,8 +336,7 @@ export const speaksAcp = (known: Pick<Known, "adapter">): boolean => known.adapt
 
 /** What Chips says in place of a reply the kind gives when its account can't be used; nothing for any other. */
 export function stoppedWith(kind: KindConfig, reply: string): string | undefined {
-  const stops = knownBy(kind)?.stops;
-  return stops !== undefined && stops.reply.test(reply) ? stops.says : undefined;
+  return knownBy(kind)?.stops?.find((stop) => stop.reply.test(reply))?.says;
 }
 
 /** The tool a call is for, where the kind names it in the call's `_meta` (`toolMeta`). */

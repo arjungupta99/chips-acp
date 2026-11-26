@@ -64,6 +64,8 @@ async function rig(
     ownRules?: unknown[];
     /** The home folder the bridge reads settings from: a new empty one, never the real one. */
     home?: string;
+    /** The environment the bridge runs its agent in, in place of this process's. */
+    env?: Record<string, string>;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES, harnessName: "Fakey" }));
@@ -93,6 +95,7 @@ async function rig(
     respawnMs: 20,
     gatherMs: options.gatherMs ?? 10,
     home: options.home ?? mkdtempSync(join(tmpdir(), "chips-acp-home-")),
+    ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.projects === undefined ? {} : { projects: options.projects }),
     ...(options.idleMs === undefined ? {} : { idleMs: options.idleMs }),
   });
@@ -1686,12 +1689,42 @@ describe("Antigravity while Google wants its account verified (Chips ADR 0301)",
     assert.ok(logs.some((line) => line.includes("couldn't answer: Google wants")));
   });
 
+  it("fails the turn with where to make a new key, in place of Google's refusal of its Gemini API key", async () => {
+    const agent = fakeAgent();
+    const { chips } = await rig({ agent, command: ["agy", "acp"] });
+    await chips.say("badkey");
+    const failed = await sent(chips, "run.failed");
+    assert.match(String(failed.payload["error"]), /^Google refused the Gemini API key Antigravity runs on here\. Make a new key at https:\/\/aistudio\.google\.com\/app\/apikey/);
+    assert.equal(failed.payload["retryable"], true);
+    assert.ok(!chips.workspace.log.some((event) => event.type === "message.post" && String(event.payload["text"]).includes("API key not valid")));
+  });
+
   it("is said as it was by any other kind", async () => {
     const agent = fakeAgent();
     const { chips } = await rig({ agent });
     await chips.say("verify");
     await sent(chips, "run.completed");
     assert.ok(chips.workspace.log.some((event) => event.type === "message.post" && event.payload["text"] === "⚠ Verification Required"));
+  });
+});
+
+describe("Antigravity on a Gemini API key", () => {
+  const offered = { methods: ["oauth-personal", "oauth-business", "gemini-api-key", "agent-platform"], saved: true };
+
+  it("is asked to run on the key where GEMINI_API_KEY is set", async () => {
+    const agent = fakeAgent({ signIn: offered });
+    const { chips } = await rig({ agent, command: ["agy", "acp"], env: { GEMINI_API_KEY: "test-key" } });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    assert.deepEqual(agent.authenticated, ["gemini-api-key"]);
+  });
+
+  it("is asked nothing where none is, and runs on the Google account it saved", async () => {
+    const agent = fakeAgent({ signIn: offered });
+    const { chips } = await rig({ agent, command: ["agy", "acp"], env: { GEMINI_API_KEY: "" } });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    assert.deepEqual(agent.authenticated, []);
   });
 });
 
