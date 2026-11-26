@@ -56,9 +56,12 @@ also looks where that line puts the agent, since a terminal opened before doesn'
   otherwise.
 - **Antigravity** runs on a Gemini API key where `GEMINI_API_KEY` is set: the bridge asks it to sign
   in that way (`authenticate` with `gemini-api-key`), which Google names for use with nobody at the
-  screen. That needs no `modelProvider` in its settings, so `agy` in a terminal stays on the Google
-  account. With no key, it runs on the account `agy acp --login` saved. Its Auto is offered only
-  where Antigravity has it: a personal Google account with its terminal sandbox on.
+  screen. That needs no `modelProvider` in its settings, but Antigravity keeps the way it was last
+  asked to sign in, in `~/.gemini/antigravity-cli/cache/acp-auth-state.json`: with the key taken
+  away, it stays signed out until that file is removed. With no key, it runs on the account `agy acp
+  --login` saved, which offers more models than a key does (Claude and GPT-OSS as well as Gemini).
+  Its Auto is offered only where Antigravity has it: a personal Google account with its terminal
+  sandbox on.
 - None of the five copies a session (`session/fork`), so their cards leave Fork off. Cursor, Copilot,
   Goose and Grok offer their models as a session's `model` option, where they do, and the bridge
   offers them in Chips as it does Claude Code's and Codex's, each once (Copilot on GitHub's free plan

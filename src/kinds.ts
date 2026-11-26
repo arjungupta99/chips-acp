@@ -274,8 +274,9 @@ const KNOWN: readonly Known[] = [
     keys: ["GEMINI_API_KEY"],
     // On a Gemini API key where one is set, which Google names for use with nobody at the screen;
     // else on the Google account `agy acp --login` saved, which it needs no asking for. Asked over
-    // ACP, it runs on the key with no `modelProvider` in its settings, so `agy` in a terminal stays
-    // on the account. It checks only that the key isn't empty: a wrong one is refused at the turn.
+    // ACP, it runs on the key with no `modelProvider` in its settings, but it keeps the way it was
+    // last asked (`cache/acp-auth-state.json`): with the key gone, it is signed out until that file
+    // is. It checks only that the key isn't empty: a wrong one is refused at the turn.
     headless: [{ id: "gemini-api-key", env: "GEMINI_API_KEY" }],
     stops: [
       {
